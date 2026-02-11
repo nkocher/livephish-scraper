@@ -1,0 +1,106 @@
+name: Test & Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run tests
+        run: uv run pytest -v
+
+  build-windows:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Build Windows binary
+        run: |
+          uv run pyinstaller --onefile --name livephish src/livephish/__main__.py `
+            --hidden-import=keyring.backends.Windows `
+            --hidden-import=InquirerPy.prompts.fuzzy `
+            --hidden-import=InquirerPy.prompts.secret `
+            --hidden-import=InquirerPy.prompts.confirm `
+            --hidden-import=InquirerPy.prompts.text `
+            --hidden-import=InquirerPy.prompts.list `
+            --hidden-import=platformdirs `
+            --collect-submodules=rich._unicode_data
+
+      - name: Test binary
+        run: |
+          dist\livephish.exe --version
+          dist\livephish.exe --help
+
+      - name: Package Windows release
+        run: |
+          Copy-Item scripts\LivePhish.bat dist\
+          Compress-Archive -Path dist\livephish.exe, dist\LivePhish.bat -DestinationPath dist\LivePhish-Windows.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivePhish-Windows
+          path: dist/LivePhish-Windows.zip
+
+  build-macos:
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Build macOS binary
+        run: |
+          uv run pyinstaller --onefile --name livephish src/livephish/__main__.py \
+            --hidden-import=keyring.backends.macOS \
+            --hidden-import=InquirerPy.prompts.fuzzy \
+            --hidden-import=InquirerPy.prompts.secret \
+            --hidden-import=InquirerPy.prompts.confirm \
+            --hidden-import=InquirerPy.prompts.text \
+            --hidden-import=InquirerPy.prompts.list \
+            --hidden-import=platformdirs \
+            --collect-submodules=rich._unicode_data
+
+      - name: Test binary
+        run: |
+          dist/livephish --version
+          dist/livephish --help
+
+      - name: Package macOS release
+        run: |
+          cp scripts/LivePhish.command dist/
+          chmod +x dist/LivePhish.command dist/livephish
+          cd dist && zip -r LivePhish-macOS.zip livephish LivePhish.command
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivePhish-macOS
+          path: dist/LivePhish-macOS.zip
