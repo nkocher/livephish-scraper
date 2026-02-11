@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
-
 import keyring
 import platformdirs
 import yaml
-from InquirerPy import inquirer
-
-from livephish.models import FORMAT_LABELS
 
 
 @dataclass
@@ -31,6 +28,9 @@ CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 # Keyring service name
 KEYRING_SERVICE = "livephish"
+
+# Session cache
+SESSION_CACHE_FILE = CACHE_DIR / "session.json"
 
 
 def load_config() -> Config:
@@ -139,68 +139,71 @@ def save_credentials(email: str, password: str) -> None:
         )
 
 
+def load_session_cache() -> dict | None:
+    """Load cached session tokens if still valid (24h TTL)."""
+    if not SESSION_CACHE_FILE.exists():
+        return None
+    try:
+        data = json.loads(SESSION_CACHE_FILE.read_text())
+        if time.time() - data.get("cached_at", 0) > 86400:
+            return None
+        return data
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def save_session_cache(
+    access_token: str,
+    session_token: str,
+    stream_params_dict: dict,
+) -> None:
+    """Save session tokens to cache file."""
+    data = {
+        "access_token": access_token,
+        "session_token": session_token,
+        "stream_params": stream_params_dict,
+        "cached_at": time.time(),
+    }
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_CACHE_FILE.write_text(json.dumps(data))
+
+
+def clear_session_cache() -> None:
+    """Remove cached session."""
+    if SESSION_CACHE_FILE.exists():
+        SESSION_CACHE_FILE.unlink()
+
+
 def first_run_wizard() -> Config:
-    """
-    Interactive setup wizard for first-time configuration.
+    """Interactive setup wizard using plain input/getpass (no InquirerPy)."""
+    from getpass import getpass
 
-    Prompts user for:
-    - Email address
-    - Password (stored in keyring)
-    - Audio format preference
-    - Output directory
+    print("\n  LivePhish — First Run Setup\n")
 
-    Returns:
-        Config: Newly created configuration
-    """
-    print("\n🎵 LivePhish Scraper - First Run Setup\n")
+    email = input("  Email: ").strip()
+    if not email or "@" not in email:
+        raise ValueError("Invalid email address")
 
-    # Ask for email
-    email = inquirer.text(
-        message="Email address:",
-        validate=lambda x: "@" in x and len(x) > 3,
-        invalid_message="Please enter a valid email address",
-    ).execute()
+    password = getpass("  Password: ")
+    if not password:
+        raise ValueError("Password required")
 
-    # Ask for password
-    password = inquirer.secret(
-        message="Password:",
-        validate=lambda x: len(x) > 0,
-        invalid_message="Password cannot be empty",
-    ).execute()
+    print("\n  Audio format:")
+    print("    1) FLAC (lossless, recommended)")
+    print("    2) ALAC (lossless, Apple)")
+    print("    3) AAC (lossy, smaller files)")
+    fmt_choice = input("  Choice [1]: ").strip() or "1"
+    format_map = {"1": "flac", "2": "alac", "3": "aac"}
+    audio_format = format_map.get(fmt_choice, "flac")
 
-    # Ask for format
-    format_choices = [
-        {"name": f"FLAC ({FORMAT_LABELS['flac']}) - Recommended", "value": "flac"},
-        {"name": f"ALAC ({FORMAT_LABELS['alac']})", "value": "alac"},
-        {"name": f"AAC ({FORMAT_LABELS['aac']})", "value": "aac"},
-    ]
+    output_dir = input("  Output directory [~/Music/LivePhish]: ").strip()
+    output_dir = output_dir or "~/Music/LivePhish"
 
-    audio_format = inquirer.select(
-        message="Select audio format:",
-        choices=format_choices,
-        default="flac",
-    ).execute()
-
-    # Ask for output directory
-    output_dir = inquirer.text(
-        message="Output directory:",
-        default="~/Music/LivePhish",
-    ).execute()
-
-    # Create config
-    config = Config(
-        email=email,
-        format=audio_format,
-        output_dir=output_dir,
-        epoch_compensation=0,
-    )
-
-    # Save config and credentials
+    config = Config(email=email, format=audio_format, output_dir=output_dir)
     save_config(config)
     save_credentials(email, password)
 
-    print(f"\n✓ Configuration saved to {CONFIG_FILE}")
-    print(f"✓ Password stored securely in system keyring")
-    print(f"✓ Downloads will be saved to {Path(output_dir).expanduser()}\n")
-
+    print(f"\n  Config saved to {CONFIG_FILE}")
+    print(f"  Password stored in system keyring")
+    print(f"  Downloads will go to {Path(output_dir).expanduser()}\n")
     return config

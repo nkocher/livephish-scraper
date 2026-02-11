@@ -336,3 +336,153 @@ def test_login_convenience(api):
     assert isinstance(stream_params, StreamParams)
     assert plan_name == "LivePhish+ Annual"
     assert api._access_token == "test_token"
+
+
+@respx.mock
+def test_login_cached_cache_miss(api, monkeypatch):
+    """Test login_cached performs full auth when no cache exists."""
+    # Mock no cache
+    monkeypatch.setattr("livephish.config.load_session_cache", lambda: None)
+
+    saved = {}
+    def mock_save(access_token, session_token, stream_params_dict):
+        saved.update({"access_token": access_token, "stream_params": stream_params_dict})
+    monkeypatch.setattr("livephish.config.save_session_cache", mock_save)
+
+    # Mock the token endpoint
+    respx.post(f"{AUTH_BASE}token").mock(
+        return_value=httpx.Response(200, json={"access_token": "new_token"})
+    )
+
+    def route_secure_api(request):
+        method = request.url.params.get("method", "")
+        if method == "session.getUserToken":
+            return httpx.Response(200, json={"Response": {"tokenValue": "sess"}})
+        elif method == "user.getSubscriberInfo":
+            return httpx.Response(200, json={
+                "Response": {
+                    "subscriptionInfo": {
+                        "subscriptionID": "sub_1",
+                        "subCostplanIDAccessList": "1",
+                        "userID": 1,
+                        "startDateStamp": 100,
+                        "endDateStamp": 200,
+                        "canStreamSubContent": True,
+                        "planName": "Test Plan",
+                    }
+                }
+            })
+        return httpx.Response(404)
+
+    respx.get(f"{API_BASE}secureApi.aspx").mock(side_effect=route_secure_api)
+
+    params, status = api.login_cached("user@example.com", "pass")
+    assert isinstance(params, StreamParams)
+    assert status == "Test Plan"
+    assert saved["access_token"] == "new_token"
+
+
+@respx.mock
+def test_login_cached_cache_hit(api, monkeypatch):
+    """Test login_cached uses valid cached session."""
+    import time as time_mod
+
+    cached_data = {
+        "access_token": "cached_token",
+        "session_token": "cached_sess",
+        "stream_params": {
+            "subscription_id": "sub_cached",
+            "sub_costplan_id_access_list": "1,2",
+            "user_id": "99",
+            "start_stamp": "100",
+            "end_stamp": "200",
+        },
+        "cached_at": time_mod.time(),
+        "test_container_id": 1,
+    }
+    monkeypatch.setattr("livephish.config.load_session_cache", lambda: cached_data)
+    monkeypatch.setattr("livephish.config.save_session_cache", lambda *a, **kw: None)
+    monkeypatch.setattr("livephish.config.clear_session_cache", lambda: None)
+
+    # Mock the validation call (get_show_detail)
+    respx.get(f"{API_BASE}api.aspx").mock(
+        return_value=httpx.Response(200, json={
+            "Response": {
+                "containerID": 1,
+                "artistName": "Phish",
+                "containerInfo": "Test",
+                "venueName": "Venue",
+                "venueCity": "City",
+                "venueState": "ST",
+                "performanceDate": "2024-01-01",
+                "performanceDateFormatted": "01/01/2024",
+                "performanceDateYear": "2024",
+                "tracks": [],
+            }
+        })
+    )
+
+    params, status = api.login_cached("user@example.com", "pass")
+    assert status == "Cached session"
+    assert params.subscription_id == "sub_cached"
+
+
+@respx.mock
+def test_login_cached_stale_cache(api, monkeypatch):
+    """Test login_cached falls back to full auth when cache is stale."""
+    import time as time_mod
+
+    cached_data = {
+        "access_token": "old_token",
+        "session_token": "old_sess",
+        "stream_params": {
+            "subscription_id": "sub_old",
+            "sub_costplan_id_access_list": "1",
+            "user_id": "1",
+            "start_stamp": "100",
+            "end_stamp": "200",
+        },
+        "cached_at": time_mod.time(),
+        "test_container_id": 1,
+    }
+    monkeypatch.setattr("livephish.config.load_session_cache", lambda: cached_data)
+
+    cleared = []
+    monkeypatch.setattr("livephish.config.clear_session_cache", lambda: cleared.append(True))
+    monkeypatch.setattr("livephish.config.save_session_cache", lambda *a, **kw: None)
+
+    call_count = {"validate": 0, "auth": 0}
+
+    # Make validation always fail (stale token) — must fail on all retries
+    def route_api(request):
+        method = request.url.params.get("method", "")
+        if method == "catalog.container":
+            call_count["validate"] += 1
+            raise httpx.ConnectError("Simulated auth failure")
+        elif method == "session.getUserToken":
+            return httpx.Response(200, json={"Response": {"tokenValue": "new_sess"}})
+        elif method == "user.getSubscriberInfo":
+            return httpx.Response(200, json={
+                "Response": {
+                    "subscriptionInfo": {
+                        "subscriptionID": "sub_new",
+                        "subCostplanIDAccessList": "1",
+                        "userID": 1,
+                        "startDateStamp": 100,
+                        "endDateStamp": 200,
+                        "canStreamSubContent": True,
+                        "planName": "New Plan",
+                    }
+                }
+            })
+        return httpx.Response(404)
+
+    respx.get(f"{API_BASE}api.aspx").mock(side_effect=route_api)
+    respx.get(f"{API_BASE}secureApi.aspx").mock(side_effect=route_api)
+    respx.post(f"{AUTH_BASE}token").mock(
+        return_value=httpx.Response(200, json={"access_token": "fresh_token"})
+    )
+
+    params, status = api.login_cached("user@example.com", "pass")
+    assert status == "New Plan"
+    assert len(cleared) == 1  # Cache was cleared

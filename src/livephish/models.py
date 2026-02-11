@@ -42,15 +42,28 @@ class StreamParams:
 class Quality:
     """Audio quality/format info derived from stream URL."""
 
+    code: str
     specs: str
     extension: str
 
     @staticmethod
     def from_stream_url(url: str) -> Quality | None:
         quality_map = {
-            ".alac16/": Quality(specs="16-bit / 44.1 kHz ALAC", extension=".m4a"),
-            ".flac16/": Quality(specs="16-bit / 44.1 kHz FLAC", extension=".flac"),
-            ".aac150/": Quality(specs="AAC 150", extension=".m4a"),
+            ".alac16/": Quality(
+                code="alac",
+                specs="16-bit / 44.1 kHz ALAC",
+                extension=".m4a",
+            ),
+            ".flac16/": Quality(
+                code="flac",
+                specs="16-bit / 44.1 kHz FLAC",
+                extension=".flac",
+            ),
+            ".aac150/": Quality(
+                code="aac",
+                specs="AAC 150",
+                extension=".m4a",
+            ),
         }
         for pattern, quality in quality_map.items():
             if pattern in url:

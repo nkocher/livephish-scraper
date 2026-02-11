@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from dataclasses import asdict
+
 from livephish.models import Show, StreamParams
 
 # API Constants
@@ -239,7 +241,20 @@ class LivePhishAPI:
             },
         )
 
-        data = response.json()
+        if response.status_code != 200:
+            raise APIError(
+                f"Failed to fetch show {container_id}: HTTP {response.status_code}"
+            )
+        try:
+            data = response.json()
+        except ValueError:
+            raise APIError(
+                f"Invalid API response for show {container_id}"
+            )
+        if "Response" not in data:
+            raise APIError(
+                f"Unexpected API response for show {container_id}"
+            )
         return Show.from_dict(data["Response"])
 
     def get_stream_url(
@@ -305,6 +320,51 @@ class LivePhishAPI:
         self.authenticate(email, password)
         session_token = self.get_user_token(email, password)
         return self.get_subscriber_info(email, session_token)
+
+    def login_cached(
+        self, email: str, password: str
+    ) -> tuple[StreamParams, str]:
+        """Try cached session first, fall back to full login.
+
+        Loads cached tokens and validates with an auth-required API call.
+        If the cache is missing, expired, or invalid, performs the full
+        3-step authentication and caches the new tokens.
+
+        Returns:
+            Tuple of (StreamParams, status_message)
+        """
+        from livephish.config import (
+            clear_session_cache,
+            load_session_cache,
+            save_session_cache,
+        )
+
+        cached = load_session_cache()
+        if cached:
+            try:
+                self._access_token = cached["access_token"]
+                sp = cached["stream_params"]
+                params = StreamParams(
+                    subscription_id=sp["subscription_id"],
+                    sub_costplan_id_access_list=sp["sub_costplan_id_access_list"],
+                    user_id=sp["user_id"],
+                    start_stamp=sp["start_stamp"],
+                    end_stamp=sp["end_stamp"],
+                )
+                # Validate with an auth-required call
+                self.get_show_detail(cached.get("test_container_id", 1))
+                return params, "Cached session"
+            except (AuthError, APIError, KeyError, ValueError):
+                clear_session_cache()
+
+        # Full 3-step auth
+        params, plan_name = self.login(email, password)
+        save_session_cache(
+            access_token=self._access_token or "",
+            session_token="",  # not needed after login
+            stream_params_dict=asdict(params),
+        )
+        return params, plan_name
 
     def close(self) -> None:
         """Close the HTTP client."""

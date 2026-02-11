@@ -53,8 +53,9 @@ class MockAPI:
         self._catalog_data.append(show_data)
 
 
-def test_cache_save_load_round_trip(tmp_cache):
+def test_cache_save_load_round_trip(tmp_cache, monkeypatch):
     """Test saving and loading catalog cache."""
+    monkeypatch.setattr("livephish.catalog.MIN_CATALOG_SIZE", 0)
     mock_api = MockAPI()
     mock_api.add_show(
         container_id=1,
@@ -121,11 +122,49 @@ def test_search_by_venue(tmp_cache):
     catalog = Catalog(mock_api)
     catalog.load()
 
-    # Search for "Madison Square Garden"
     results = catalog.search("Madison Square Garden")
-
-    assert len(results) == 1
+    assert len(results) >= 1
     assert results[0].venue_name == "Madison Square Garden"
+
+
+def test_search_fuzzy_abbreviation(tmp_cache):
+    """Test fuzzy search handles abbreviations like MSG."""
+    mock_api = MockAPI()
+    mock_api.add_show(container_id=1, venue_name="Madison Square Garden", venue_city="New York", venue_state="NY")
+    mock_api.add_show(container_id=2, venue_name="Sphere", venue_city="Las Vegas", venue_state="NV")
+
+    catalog = Catalog(mock_api)
+    catalog.load()
+
+    results = catalog.search("msg")
+    assert len(results) >= 1
+    assert results[0].venue_name == "Madison Square Garden"
+
+
+def test_search_state_name_expansion(tmp_cache):
+    """Test that searching by full state name matches state abbreviations."""
+    mock_api = MockAPI()
+    mock_api.add_show(container_id=1, venue_name="Cuthbert Amphitheater", venue_city="Eugene", venue_state="OR")
+    mock_api.add_show(container_id=2, venue_name="Red Rocks", venue_city="Morrison", venue_state="CO")
+
+    catalog = Catalog(mock_api)
+    catalog.load()
+
+    results = catalog.search("oregon")
+    assert len(results) >= 1
+    assert results[0].venue_state == "OR"
+
+
+def test_search_empty_query(tmp_cache):
+    """Test that empty query returns no results."""
+    mock_api = MockAPI()
+    mock_api.add_show(container_id=1, venue_name="Test Venue")
+
+    catalog = Catalog(mock_api)
+    catalog.load()
+
+    assert catalog.search("") == []
+    assert catalog.search("   ") == []
 
 
 def test_search_by_date(tmp_cache):
@@ -147,10 +186,11 @@ def test_search_by_date(tmp_cache):
     catalog = Catalog(mock_api)
     catalog.load()
 
-    # Search for specific date
+    # Search for specific date — fuzzy search may return partial matches
+    # but the exact date match should be first
     results = catalog.search("2024-08-31")
 
-    assert len(results) == 1
+    assert len(results) >= 1
     assert results[0].performance_date == "2024-08-31"
 
 
@@ -163,10 +203,8 @@ def test_search_case_insensitive(tmp_cache):
     catalog = Catalog(mock_api)
     catalog.load()
 
-    # Search with lowercase should match
     results = catalog.search("madison")
-
-    assert len(results) == 1
+    assert len(results) >= 1
     assert results[0].venue_name == "Madison Square Garden"
 
 
@@ -222,7 +260,7 @@ def test_get_shows_by_year_sorted(tmp_cache):
 
 
 def test_search_word_based(tmp_cache):
-    """Test word-based search: all words must match."""
+    """Test search with multiple terms — top result has best match."""
     mock_api = MockAPI()
     mock_api.add_show(
         container_id=1,
@@ -255,17 +293,14 @@ def test_search_word_based(tmp_cache):
     catalog = Catalog(mock_api)
     catalog.load()
 
-    # Search for "dick 2024" - should match only the 2024 Dick's show
     results = catalog.search("dick 2024")
-
-    assert len(results) == 1
+    assert len(results) >= 1
+    # Top result should be a Dick's 2024 show
     assert results[0].container_id == 1
-    assert results[0].venue_name == "Dick's Sporting Goods Park"
-    assert "2024" in results[0].performance_date
 
 
 def test_search_multi_word(tmp_cache):
-    """Test multi-word search: all words must appear in searchable text."""
+    """Test multi-word search returns relevant results."""
     mock_api = MockAPI()
     mock_api.add_show(
         container_id=1,
@@ -287,10 +322,8 @@ def test_search_multi_word(tmp_cache):
     catalog = Catalog(mock_api)
     catalog.load()
 
-    # Search for "commerce city" - should match Dick's venue
     results = catalog.search("commerce city")
-
-    assert len(results) == 1
+    assert len(results) >= 1
     assert results[0].venue_city == "Commerce City"
 
 
@@ -309,7 +342,7 @@ def test_search_no_match(tmp_cache):
     catalog = Catalog(mock_api)
     catalog.load()
 
-    # Search for venue that doesn't exist
-    results = catalog.search("nonexistent venue 9999")
+    # Search for something with zero overlap with any corpus content
+    results = catalog.search("xyzzyqwkjhplm")
 
     assert len(results) == 0

@@ -261,3 +261,118 @@ class TestGetCredentialsFallback:
         # Should not raise
         from livephish.config import save_credentials
         save_credentials("test@example.com", "password123")
+
+
+class TestSessionCache:
+    """Tests for session cache load/save/expiry."""
+
+    def test_save_and_load_session_cache(self, tmp_path, monkeypatch):
+        """Test saving and loading session cache."""
+        cache_dir = tmp_path / "cache"
+        cache_file = cache_dir / "session.json"
+        monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "SESSION_CACHE_FILE", cache_file)
+
+        from livephish.config import load_session_cache, save_session_cache
+
+        # Save session
+        save_session_cache(
+            access_token="test_access",
+            session_token="test_session",
+            stream_params_dict={
+                "subscription_id": "sub_123",
+                "sub_costplan_id_access_list": "1,2,3",
+                "user_id": "456",
+                "start_stamp": "1700000000",
+                "end_stamp": "1800000000",
+            },
+        )
+
+        assert cache_file.exists()
+
+        # Load session
+        cached = load_session_cache()
+        assert cached is not None
+        assert cached["access_token"] == "test_access"
+        assert cached["session_token"] == "test_session"
+        assert cached["stream_params"]["subscription_id"] == "sub_123"
+
+    def test_session_cache_expiry(self, tmp_path, monkeypatch):
+        """Test session cache expires after 24 hours."""
+        import time as time_mod
+
+        cache_dir = tmp_path / "cache"
+        cache_file = cache_dir / "session.json"
+        monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "SESSION_CACHE_FILE", cache_file)
+
+        from livephish.config import load_session_cache, save_session_cache
+
+        # Save session with a timestamp 25 hours ago
+        save_session_cache(
+            access_token="old_token",
+            session_token="old_session",
+            stream_params_dict={"subscription_id": "sub_old"},
+        )
+
+        # Manually override cached_at to 25 hours ago
+        import json
+        data = json.loads(cache_file.read_text())
+        data["cached_at"] = time_mod.time() - (25 * 3600)
+        cache_file.write_text(json.dumps(data))
+
+        # Should return None (expired)
+        cached = load_session_cache()
+        assert cached is None
+
+    def test_session_cache_missing(self, tmp_path, monkeypatch):
+        """Test loading session cache when file doesn't exist."""
+        cache_dir = tmp_path / "cache"
+        cache_file = cache_dir / "session.json"
+        monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "SESSION_CACHE_FILE", cache_file)
+
+        from livephish.config import load_session_cache
+        assert load_session_cache() is None
+
+    def test_clear_session_cache(self, tmp_path, monkeypatch):
+        """Test clearing session cache."""
+        cache_dir = tmp_path / "cache"
+        cache_file = cache_dir / "session.json"
+        monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "SESSION_CACHE_FILE", cache_file)
+
+        from livephish.config import clear_session_cache, save_session_cache
+
+        save_session_cache(
+            access_token="tok",
+            session_token="sess",
+            stream_params_dict={},
+        )
+        assert cache_file.exists()
+
+        clear_session_cache()
+        assert not cache_file.exists()
+
+    def test_clear_session_cache_noop_if_missing(self, tmp_path, monkeypatch):
+        """Test clearing when no cache exists doesn't crash."""
+        cache_dir = tmp_path / "cache"
+        cache_file = cache_dir / "session.json"
+        monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "SESSION_CACHE_FILE", cache_file)
+
+        from livephish.config import clear_session_cache
+        clear_session_cache()  # Should not raise
+
+    def test_session_cache_corrupt_json(self, tmp_path, monkeypatch):
+        """Test loading corrupt session cache returns None."""
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir(parents=True)
+        cache_file = cache_dir / "session.json"
+        monkeypatch.setattr(config, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "SESSION_CACHE_FILE", cache_file)
+
+        cache_file.write_text("not valid json{{{")
+
+        from livephish.config import load_session_cache
+        assert load_session_cache() is None

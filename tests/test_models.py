@@ -208,6 +208,7 @@ class TestQuality:
         quality = Quality.from_stream_url(url)
 
         assert quality is not None
+        assert quality.code == "alac"
         assert quality.specs == "16-bit / 44.1 kHz ALAC"
         assert quality.extension == ".m4a"
 
@@ -217,6 +218,7 @@ class TestQuality:
         quality = Quality.from_stream_url(url)
 
         assert quality is not None
+        assert quality.code == "flac"
         assert quality.specs == "16-bit / 44.1 kHz FLAC"
         assert quality.extension == ".flac"
 
@@ -226,6 +228,7 @@ class TestQuality:
         quality = Quality.from_stream_url(url)
 
         assert quality is not None
+        assert quality.code == "aac"
         assert quality.specs == "AAC 150"
         assert quality.extension == ".m4a"
 

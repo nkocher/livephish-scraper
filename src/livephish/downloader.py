@@ -159,3 +159,59 @@ def download_track(
         logger.error(f"Download failed for {display_name}: {e}")
         # Leave .part file for debugging
         raise
+
+
+def download_track_raw(
+    url: str,
+    dest: Path,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Download a single track with callback-based progress reporting.
+
+    Unlike download_track(), this doesn't require a Rich Progress instance,
+    making it suitable for use with Textual's progress widgets.
+
+    Args:
+        url: Download URL
+        dest: Final destination path
+        on_progress: Optional callback(bytes_downloaded, total_bytes)
+
+    Returns:
+        Path to the downloaded file
+    """
+    part_path = dest.with_suffix(dest.suffix + ".part")
+
+    if part_path.exists():
+        part_path.unlink()
+
+    try:
+        with httpx.stream(
+            "GET",
+            url,
+            headers={
+                "Referer": REFERER,
+                "User-Agent": USER_AGENT,
+                "Range": "bytes=0-",
+            },
+            follow_redirects=True,
+            timeout=60.0,
+        ) as response:
+            response.raise_for_status()
+
+            total = int(response.headers.get("content-length", 0))
+            downloaded = 0
+
+            with part_path.open("wb") as f:
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if on_progress is not None:
+                        on_progress(downloaded, total)
+
+        part_path.rename(dest)
+        logger.info(f"Downloaded: {dest.name}")
+        return dest
+
+    except Exception as e:
+        logger.error(f"Download failed for {dest.name}: {e}")
+        raise
