@@ -6,9 +6,11 @@ import pytest
 
 from livephish.browser import (
     BACK,
+    _parse_container_ids,
     browse_by_year,
     download_queued_shows,
     edit_settings,
+    import_url,
     main_menu,
     manage_queue,
     search_shows,
@@ -471,3 +473,165 @@ def test_settings_saves_config(mock_inq, mock_save, config):
     assert config.format == "alac"
     assert config.output_dir == "/tmp/new-output"
     mock_save.assert_called_once_with(config)
+
+
+# -- URL parsing ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("https://plus.livephish.com/release/418", [418]),
+        ("418", [418]),
+        ("https://plus.livephish.com/release/418 https://plus.livephish.com/release/999", [418, 999]),
+        ("https://plus.livephish.com/release/418 999", [418, 999]),
+        ("https://plus.livephish.com/release/418 418", [418]),  # dedup
+        ("", []),
+        ("no numbers here", []),
+        ("https://plus.livephish.com/release/418?foo=bar", [418]),
+        ("0", []),  # zero excluded
+        ("  418 , 999 ", [418, 999]),  # comma/whitespace separated
+    ],
+    ids=[
+        "full_url",
+        "bare_id",
+        "multiple_urls",
+        "url_and_bare_id",
+        "dedup",
+        "empty",
+        "garbage",
+        "url_with_query_params",
+        "zero_excluded",
+        "comma_separated",
+    ],
+)
+def test_parse_container_ids(text, expected):
+    assert _parse_container_ids(text) == expected
+
+
+# -- CatalogShow.from_show ----------------------------------------------------
+
+
+def test_catalog_show_from_show(full_show):
+    """CatalogShow.from_show maps all shared fields correctly."""
+    catalog_show = CatalogShow.from_show(full_show)
+    assert catalog_show.container_id == full_show.container_id
+    assert catalog_show.artist_name == full_show.artist_name
+    assert catalog_show.container_info == full_show.container_info
+    assert catalog_show.venue_name == full_show.venue_name
+    assert catalog_show.venue_city == full_show.venue_city
+    assert catalog_show.venue_state == full_show.venue_state
+    assert catalog_show.performance_date == full_show.performance_date
+    assert catalog_show.performance_date_formatted == full_show.performance_date_formatted
+    assert catalog_show.performance_date_year == full_show.performance_date_year
+    assert catalog_show.image_url == full_show.image_url
+    assert catalog_show.song_list == ""  # Show doesn't carry song_list
+
+
+# -- Import URL ----------------------------------------------------------------
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_fetches_show(mock_inq, mock_api, full_show, stream_params, config):
+    """Full URL input fetches the correct container_id and shows detail."""
+    mock_inq.text.return_value.execute.return_value = "https://plus.livephish.com/release/1001"
+    mock_inq.select.return_value.execute.return_value = "back"
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    mock_api.get_show_detail.assert_called_once_with(1001)
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_bare_id(mock_inq, mock_api, full_show, stream_params, config):
+    """Bare integer input fetches the correct container_id."""
+    mock_inq.text.return_value.execute.return_value = "1001"
+    mock_inq.select.return_value.execute.return_value = "back"
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    mock_api.get_show_detail.assert_called_once_with(1001)
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_multiple(mock_inq, mock_api, full_show, stream_params, config):
+    """Multiple URLs/IDs fetches each in sequence."""
+    mock_inq.text.return_value.execute.return_value = "https://plus.livephish.com/release/100 200"
+    mock_inq.select.return_value.execute.return_value = "back"
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    assert mock_api.get_show_detail.call_count == 2
+    mock_api.get_show_detail.assert_any_call(100)
+    mock_api.get_show_detail.assert_any_call(200)
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_empty_input(mock_inq, mock_api, stream_params, config):
+    """Empty/whitespace/escape input returns without API calls."""
+    mock_inq.text.return_value.execute.return_value = "  "
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    mock_api.get_show_detail.assert_not_called()
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_escape(mock_inq, mock_api, stream_params, config):
+    """Escape (None) returns without API calls."""
+    mock_inq.text.return_value.execute.return_value = None
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    mock_api.get_show_detail.assert_not_called()
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_no_valid_ids(mock_inq, _mock_console, mock_api, stream_params, config):
+    """Input with no valid IDs shows warning."""
+    mock_inq.text.return_value.execute.return_value = "no numbers here"
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    mock_api.get_show_detail.assert_not_called()
+    printed = [str(call.args[0]) for call in _mock_console.print.call_args_list if call.args]
+    assert any("No valid show IDs" in line for line in printed)
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_api_error_continues(mock_inq, stream_params, config):
+    """First ID fails, second succeeds — both attempted."""
+    mock_inq.text.return_value.execute.return_value = "100 200"
+    mock_inq.select.return_value.execute.return_value = "back"
+    api = MagicMock()
+    good_show = Show(
+        container_id=200,
+        artist_name="Phish",
+        container_info="2024-12-31 MSG",
+        venue_name="MSG",
+        venue_city="New York",
+        venue_state="NY",
+        performance_date="2024-12-31",
+        performance_date_formatted="12/31/2024",
+        performance_date_year="2024",
+        tracks=[],
+    )
+    api.get_show_detail.side_effect = [Exception("Not found"), good_show]
+    queue: dict[int, CatalogShow] = {}
+    import_url(api, stream_params, config, queue)
+    assert api.get_show_detail.call_count == 2
+
+
+@patch("livephish.browser.inquirer")
+def test_import_url_adds_to_queue(mock_inq, mock_api, full_show, stream_params, config):
+    """Selecting 'add' in show_detail adds the imported show to queue."""
+    mock_inq.text.return_value.execute.return_value = "1001"
+    mock_inq.select.return_value.execute.return_value = "add"
+    queue: dict[int, CatalogShow] = {}
+    import_url(mock_api, stream_params, config, queue)
+    assert 1001 in queue
+    assert queue[1001].venue_name == "Madison Square Garden"
+
+
+@patch("livephish.browser.inquirer")
+def test_show_detail_prefetched_skips_api(mock_inq, catalog_show, full_show, stream_params, config):
+    """When prefetched_show is provided, no API call is made."""
+    mock_inq.select.return_value.execute.return_value = "back"
+    api = MagicMock()
+    queue: dict[int, CatalogShow] = {}
+    show_detail(catalog_show, api, stream_params, config, queue, prefetched_show=full_show)
+    api.get_show_detail.assert_not_called()

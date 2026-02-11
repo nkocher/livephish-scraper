@@ -208,6 +208,22 @@ class CatalogShow:
             song_list=song_list if isinstance(song_list, str) else "",
         )
 
+    @classmethod
+    def from_show(cls, show: Show) -> CatalogShow:
+        """Convert a full Show to a lightweight CatalogShow for queue operations."""
+        return cls(
+            container_id=show.container_id,
+            artist_name=show.artist_name,
+            container_info=show.container_info,
+            venue_name=show.venue_name,
+            venue_city=show.venue_city,
+            venue_state=show.venue_state,
+            performance_date=show.performance_date,
+            performance_date_formatted=show.performance_date_formatted,
+            performance_date_year=show.performance_date_year,
+            image_url=show.image_url,
+        )
+
     @property
     def display_date(self) -> str:
         return self.performance_date_formatted or self.performance_date

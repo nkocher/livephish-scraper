@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -44,6 +45,16 @@ _LOADING_MESSAGES = [
 ]
 
 _ESCAPE_TIMEOUT = 0.05
+_URL_PATTERN = re.compile(r"plus\.livephish\.com/release/(\d+)")
+
+
+def _parse_container_ids(text: str) -> list[int]:
+    """Extract container IDs from URLs and bare integers."""
+    ids = [int(m) for m in _URL_PATTERN.findall(text)]
+    for token in re.split(r"[\s,]+", _URL_PATTERN.sub("", text)):
+        if token.isdigit() and int(token) > 0:
+            ids.append(int(token))
+    return list(dict.fromkeys(ids))
 
 
 def _fast_execute(prompt):
@@ -82,6 +93,8 @@ def run_browser(
             browse_by_year(catalog, api, stream_params, config, queue)
         elif action == "search":
             search_shows(catalog, api, stream_params, config, queue)
+        elif action == "import":
+            import_url(api, stream_params, config, queue)
         elif action == "queue":
             manage_queue(queue, api, stream_params, config)
         elif action == "settings":
@@ -107,6 +120,7 @@ def main_menu(queue_count: int) -> str:
         choices=[
             Choice("browse", name="Browse by year"),
             Choice("search", name="Search shows"),
+            Choice("import", name="Import URL"),
             Choice("queue", name=queue_label),
             Choice("settings", name="Settings"),
             Choice("refresh", name="Refresh catalog"),
@@ -176,6 +190,47 @@ def search_shows(
     _show_list(results, api, stream_params, config, queue, title=f'Search: "{query}"')
 
 
+def import_url(
+    api: LivePhishAPI,
+    stream_params: StreamParams,
+    config: Config,
+    queue: dict[int, CatalogShow],
+) -> None:
+    """Import show(s) by LivePhish URL or container ID."""
+    console.clear()
+    console.print(Rule(" Import URL ", style="dim"))
+    console.print()
+    console.print("[dim]Paste LivePhish URL(s) or show ID(s)[/dim]")
+
+    text = _fast_execute(inquirer.text(
+        message="URL / ID",
+        instruction="(space-separated, esc to cancel)",
+        keybindings=_ESC_BACK,
+        mandatory=False,
+    ))
+    if not text or not text.strip():
+        return
+
+    container_ids = _parse_container_ids(text)
+    if not container_ids:
+        console.print("[yellow]No valid show IDs found in input.[/yellow]")
+        console.input("[dim]Press Enter to continue...[/dim]")
+        return
+
+    for i, cid in enumerate(container_ids, 1):
+        console.clear()
+        label = f"[{i}/{len(container_ids)}] " if len(container_ids) > 1 else ""
+        console.print(f"[dim]{label}Fetching show {cid}...[/dim]")
+        try:
+            show = api.get_show_detail(cid)
+        except Exception as e:
+            console.print(f"[red]Error fetching show {cid}: {e}[/red]")
+            console.input("\n[dim]Press Enter to continue...[/dim]")
+            continue
+        catalog_show = CatalogShow.from_show(show)
+        show_detail(catalog_show, api, stream_params, config, queue, prefetched_show=show)
+
+
 def _show_list(
     shows: list[CatalogShow],
     api: LivePhishAPI,
@@ -219,17 +274,21 @@ def show_detail(
     stream_params: StreamParams,
     config: Config,
     queue: dict[int, CatalogShow],
+    prefetched_show: Show | None = None,
 ) -> None:
     """Fetch full Show, display Rich panel, offer actions."""
     console.clear()
-    console.print(f"[dim]{random.choice(_LOADING_MESSAGES)}[/dim]")
 
-    try:
-        show = api.get_show_detail(catalog_show.container_id)
-    except Exception as e:
-        console.print(f"[red]Error loading show: {e}[/red]")
-        console.input("\n[dim]Press Enter to continue...[/dim]")
-        return
+    if prefetched_show is not None:
+        show = prefetched_show
+    else:
+        console.print(f"[dim]{random.choice(_LOADING_MESSAGES)}[/dim]")
+        try:
+            show = api.get_show_detail(catalog_show.container_id)
+        except Exception as e:
+            console.print(f"[red]Error loading show: {e}[/red]")
+            console.input("\n[dim]Press Enter to continue...[/dim]")
+            return
 
     console.clear()
     _print_show_panel(show)
