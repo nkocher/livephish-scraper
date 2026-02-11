@@ -43,13 +43,20 @@ _LOADING_MESSAGES = [
     "Reading the Gamehendge map...",
 ]
 
-_ESCAPE_TIMEOUT = 0.1
+_ESCAPE_TIMEOUT = 0.05
 
 
 def _fast_execute(prompt):
-    """Execute prompt with reduced escape delay."""
+    """Execute prompt with reduced escape delay.
+
+    prompt_toolkit has two timeouts:
+    - ttimeoutlen (default 0.5s): VT100 escape byte disambiguation
+    - timeoutlen (default 1.0s): multi-key binding completion
+    Both must be reduced for snappy Escape response.
+    """
     try:
         prompt.application.ttimeoutlen = _ESCAPE_TIMEOUT
+        prompt.application.timeoutlen = _ESCAPE_TIMEOUT
     except AttributeError:
         pass  # prompt_toolkit version doesn't support this
     return prompt.execute()
