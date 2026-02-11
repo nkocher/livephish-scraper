@@ -410,8 +410,12 @@ def download_queued_shows(
             skipped_shows += 1
             continue
 
-        download_show(show, tracks_with_urls, output_dir)
-        downloaded_shows += 1
+        completed = download_show(show, tracks_with_urls, output_dir)
+        if completed:
+            downloaded_shows += 1
+        else:
+            # User cancelled — stop remaining shows
+            break
 
     # Summary
     parts = [f"[bold green]Done![/bold green] {downloaded_shows}/{total_shows} shows downloaded"]
@@ -465,8 +469,9 @@ def _download_single(
         console.print("[red]No downloadable tracks found.[/red]")
         return
 
-    download_show(show, tracks_with_urls, output_dir)
-    console.print("[bold green]Download complete![/bold green]")
+    completed = download_show(show, tracks_with_urls, output_dir)
+    if completed:
+        console.print("[bold green]Download complete![/bold green]")
 
 
 def _resolve_tracks(
