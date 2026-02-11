@@ -380,11 +380,14 @@ def test_login_cached_cache_miss(api, monkeypatch):
     assert isinstance(params, StreamParams)
     assert status == "Test Plan"
     assert saved["access_token"] == "new_token"
+    # Verify credentials stored for re-auth
+    assert api._email == "user@example.com"
+    assert api._password == "pass"
 
 
 @respx.mock
 def test_login_cached_cache_hit(api, monkeypatch):
-    """Test login_cached uses valid cached session."""
+    """Test login_cached uses valid cached session without validation call."""
     import time as time_mod
 
     cached_data = {
@@ -398,52 +401,26 @@ def test_login_cached_cache_hit(api, monkeypatch):
             "end_stamp": "200",
         },
         "cached_at": time_mod.time(),
-        "test_container_id": 1,
     }
     monkeypatch.setattr("livephish.config.load_session_cache", lambda: cached_data)
-    monkeypatch.setattr("livephish.config.save_session_cache", lambda *a, **kw: None)
-    monkeypatch.setattr("livephish.config.clear_session_cache", lambda: None)
 
-    # Mock the validation call (get_show_detail)
-    respx.get(f"{API_BASE}api.aspx").mock(
-        return_value=httpx.Response(200, json={
-            "Response": {
-                "containerID": 1,
-                "artistName": "Phish",
-                "containerInfo": "Test",
-                "venueName": "Venue",
-                "venueCity": "City",
-                "venueState": "ST",
-                "performanceDate": "2024-01-01",
-                "performanceDateFormatted": "01/01/2024",
-                "performanceDateYear": "2024",
-                "tracks": [],
-            }
-        })
-    )
-
+    # No API mocks needed — trusted cache should not make any API calls
     params, status = api.login_cached("user@example.com", "pass")
     assert status == "Cached session"
     assert params.subscription_id == "sub_cached"
+    assert api._access_token == "cached_token"
+    assert api._email == "user@example.com"
 
 
 @respx.mock
-def test_login_cached_stale_cache(api, monkeypatch):
-    """Test login_cached falls back to full auth when cache is stale."""
-    import time as time_mod
-
+def test_login_cached_corrupt_cache(api, monkeypatch):
+    """Test login_cached falls back to full auth when cache has bad keys."""
     cached_data = {
         "access_token": "old_token",
-        "session_token": "old_sess",
         "stream_params": {
             "subscription_id": "sub_old",
-            "sub_costplan_id_access_list": "1",
-            "user_id": "1",
-            "start_stamp": "100",
-            "end_stamp": "200",
+            # Missing required keys
         },
-        "cached_at": time_mod.time(),
-        "test_container_id": 1,
     }
     monkeypatch.setattr("livephish.config.load_session_cache", lambda: cached_data)
 
@@ -451,15 +428,14 @@ def test_login_cached_stale_cache(api, monkeypatch):
     monkeypatch.setattr("livephish.config.clear_session_cache", lambda: cleared.append(True))
     monkeypatch.setattr("livephish.config.save_session_cache", lambda *a, **kw: None)
 
-    call_count = {"validate": 0, "auth": 0}
+    # Mock full auth flow
+    respx.post(f"{AUTH_BASE}token").mock(
+        return_value=httpx.Response(200, json={"access_token": "fresh_token"})
+    )
 
-    # Make validation always fail (stale token) — must fail on all retries
-    def route_api(request):
+    def route_secure_api(request):
         method = request.url.params.get("method", "")
-        if method == "catalog.container":
-            call_count["validate"] += 1
-            raise httpx.ConnectError("Simulated auth failure")
-        elif method == "session.getUserToken":
+        if method == "session.getUserToken":
             return httpx.Response(200, json={"Response": {"tokenValue": "new_sess"}})
         elif method == "user.getSubscriberInfo":
             return httpx.Response(200, json={
@@ -477,12 +453,93 @@ def test_login_cached_stale_cache(api, monkeypatch):
             })
         return httpx.Response(404)
 
-    respx.get(f"{API_BASE}api.aspx").mock(side_effect=route_api)
-    respx.get(f"{API_BASE}secureApi.aspx").mock(side_effect=route_api)
-    respx.post(f"{AUTH_BASE}token").mock(
-        return_value=httpx.Response(200, json={"access_token": "fresh_token"})
-    )
+    respx.get(f"{API_BASE}secureApi.aspx").mock(side_effect=route_secure_api)
 
     params, status = api.login_cached("user@example.com", "pass")
     assert status == "New Plan"
     assert len(cleared) == 1  # Cache was cleared
+
+
+@respx.mock
+def test_reauth_on_401(api, monkeypatch):
+    """Test that _request() re-authenticates on 401 and retries."""
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    api._email = "user@example.com"
+    api._password = "pass"
+    api._access_token = "stale_token"
+
+    call_count = {"api": 0, "auth": 0}
+
+    # First API call returns 401, second (after re-auth) succeeds
+    def mock_api(request):
+        method = request.url.params.get("method", "")
+        if method == "catalog.container":
+            call_count["api"] += 1
+            if call_count["api"] == 1:
+                return httpx.Response(401, text="Unauthorized")
+            return httpx.Response(200, json={
+                "Response": {
+                    "containerID": 1,
+                    "artistName": "Phish",
+                    "containerInfo": "Test",
+                    "venueName": "Venue",
+                    "venueCity": "City",
+                    "venueState": "ST",
+                    "performanceDate": "2024-01-01",
+                    "performanceDateFormatted": "01/01/2024",
+                    "performanceDateYear": "2024",
+                    "tracks": [],
+                }
+            })
+        return httpx.Response(404)
+
+    def route_secure_api(request):
+        method = request.url.params.get("method", "")
+        if method == "session.getUserToken":
+            return httpx.Response(200, json={"Response": {"tokenValue": "sess"}})
+        elif method == "user.getSubscriberInfo":
+            return httpx.Response(200, json={
+                "Response": {
+                    "subscriptionInfo": {
+                        "subscriptionID": "sub_1",
+                        "subCostplanIDAccessList": "1",
+                        "userID": 1,
+                        "startDateStamp": 100,
+                        "endDateStamp": 200,
+                        "canStreamSubContent": True,
+                        "planName": "Reauth Plan",
+                    }
+                }
+            })
+        return httpx.Response(404)
+
+    respx.get(f"{API_BASE}api.aspx").mock(side_effect=mock_api)
+    respx.get(f"{API_BASE}secureApi.aspx").mock(side_effect=route_secure_api)
+    respx.post(f"{AUTH_BASE}token").mock(
+        return_value=httpx.Response(200, json={"access_token": "fresh_token"})
+    )
+
+    # This should trigger re-auth transparently
+    show = api.get_show_detail(1)
+    assert show.container_id == 1
+    assert call_count["api"] == 2  # First 401, then success after re-auth
+    assert api._access_token == "fresh_token"
+
+
+@respx.mock
+def test_reauth_not_triggered_without_credentials(api, monkeypatch):
+    """Test that _request() does NOT re-auth when credentials aren't stored."""
+    monkeypatch.setattr(time, "sleep", lambda x: None)
+
+    # No credentials stored
+    api._email = None
+    api._password = None
+
+    respx.get(f"{API_BASE}api.aspx").mock(
+        return_value=httpx.Response(401, text="Unauthorized")
+    )
+
+    # Should return 401 response without re-auth attempt
+    response = api._request("GET", f"{API_BASE}api.aspx", params={"method": "catalog.container", "containerID": 1, "vdisp": 1})
+    assert response.status_code == 401

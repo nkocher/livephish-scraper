@@ -19,7 +19,6 @@ class TestConfig:
         assert cfg.email == ""
         assert cfg.format == "flac"
         assert cfg.output_dir == "~/Music/LivePhish"
-        assert cfg.epoch_compensation == 0
 
 
 class TestSaveLoadConfig:
@@ -41,7 +40,6 @@ class TestSaveLoadConfig:
             email="test@example.com",
             format="alac",
             output_dir="~/Downloads/Music",
-            epoch_compensation=300,
         )
 
         # Save and load
@@ -52,7 +50,6 @@ class TestSaveLoadConfig:
         assert loaded_config.email == "test@example.com"
         assert loaded_config.format == "alac"
         assert loaded_config.output_dir == "~/Downloads/Music"
-        assert loaded_config.epoch_compensation == 300
 
     def test_load_config_creates_directories(self, tmp_path, monkeypatch):
         """Test load_config creates CONFIG_DIR and CACHE_DIR if missing."""
@@ -99,7 +96,6 @@ class TestSaveLoadConfig:
                     "email": "manual@example.com",
                     "format": "aac",
                     "output_dir": "~/Music/Test",
-                    "epoch_compensation": 600,
                 },
                 f,
             )
@@ -110,7 +106,6 @@ class TestSaveLoadConfig:
         assert cfg.email == "manual@example.com"
         assert cfg.format == "aac"
         assert cfg.output_dir == "~/Music/Test"
-        assert cfg.epoch_compensation == 600
 
     def test_save_config_creates_directory(self, tmp_path, monkeypatch):
         """Test save_config creates CONFIG_DIR if it doesn't exist."""

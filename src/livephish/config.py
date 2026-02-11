@@ -18,7 +18,6 @@ class Config:
     email: str = ""
     format: str = "flac"  # One of: "flac", "alac", "aac"
     output_dir: str = "~/Music/LivePhish"
-    epoch_compensation: int = 0
 
 
 # Configuration paths

@@ -43,6 +43,17 @@ _LOADING_MESSAGES = [
     "Reading the Gamehendge map...",
 ]
 
+_ESCAPE_TIMEOUT = 0.1
+
+
+def _fast_execute(prompt):
+    """Execute prompt with reduced escape delay."""
+    try:
+        prompt.application.ttimeoutlen = _ESCAPE_TIMEOUT
+    except AttributeError:
+        pass  # prompt_toolkit version doesn't support this
+    return prompt.execute()
+
 
 def _print_banner():
     console.print(_BANNER)
@@ -84,7 +95,7 @@ def main_menu(queue_count: int) -> str:
     else:
         queue_label = "Download queue"
 
-    return inquirer.select(
+    return _fast_execute(inquirer.select(
         message="LivePhish",
         choices=[
             Choice("browse", name="Browse by year"),
@@ -95,7 +106,7 @@ def main_menu(queue_count: int) -> str:
             Choice("quit", name="Quit"),
         ],
         instruction="(arrows to navigate, enter to select)",
-    ).execute()
+    ))
 
 
 def browse_by_year(
@@ -117,13 +128,13 @@ def browse_by_year(
     ]
     choices.append(Choice(BACK, name=BACK))
 
-    year = inquirer.fuzzy(
+    year = _fast_execute(inquirer.fuzzy(
         message="Select year",
         choices=choices,
         instruction="(type to filter, esc to go back)",
         keybindings=_ESC_BACK,
         mandatory=False,
-    ).execute()
+    ))
 
     if year is None or year == BACK:
         return
@@ -140,12 +151,12 @@ def search_shows(
     queue: dict[int, CatalogShow],
 ) -> None:
     """Text input -> fuzzy results -> show detail."""
-    query = inquirer.text(
+    query = _fast_execute(inquirer.text(
         message="Search",
         instruction="(venue, city, state, date, song... esc to go back)",
         keybindings=_ESC_BACK,
         mandatory=False,
-    ).execute()
+    ))
 
     if not query or not query.strip():
         return
@@ -180,13 +191,13 @@ def _show_list(
             choices.append(Choice(show.container_id, name=label))
         choices.append(Choice(BACK, name=BACK))
 
-        selected = inquirer.fuzzy(
+        selected = _fast_execute(inquirer.fuzzy(
             message="Select show",
             choices=choices,
             instruction="(type to filter, esc to go back)",
             keybindings=_ESC_BACK,
             mandatory=False,
-        ).execute()
+        ))
 
         if selected is None or selected == BACK:
             return
@@ -220,7 +231,7 @@ def show_detail(
     queue_action = "remove" if in_queue else "add"
     queue_label = "Remove from queue" if in_queue else "Add to queue"
 
-    action = inquirer.select(
+    action = _fast_execute(inquirer.select(
         message="Action",
         choices=[
             Choice(queue_action, name=queue_label),
@@ -230,7 +241,7 @@ def show_detail(
         instruction="(esc to go back)",
         keybindings=_ESC_BACK,
         mandatory=False,
-    ).execute()
+    ))
 
     if action == "add":
         queue[catalog_show.container_id] = catalog_show
@@ -303,7 +314,7 @@ def manage_queue(
             console.print(f"  \u2713 {show.display_date} \u00b7 {show.display_location}")
         console.print()
 
-        action = inquirer.select(
+        action = _fast_execute(inquirer.select(
             message="Queue",
             choices=[
                 Choice("download", name="Download all"),
@@ -314,7 +325,7 @@ def manage_queue(
             instruction="(esc to go back)",
             keybindings=_ESC_BACK,
             mandatory=False,
-        ).execute()
+        ))
 
         if action is None or action == "back":
             return
@@ -331,19 +342,19 @@ def manage_queue(
             ]
             remove_choices.append(Choice(BACK, name=BACK))
 
-            to_remove = inquirer.select(
+            to_remove = _fast_execute(inquirer.select(
                 message="Remove which show?",
                 choices=remove_choices,
                 instruction="(esc to cancel)",
                 keybindings=_ESC_BACK,
                 mandatory=False,
-            ).execute()
+            ))
 
             if to_remove is not None and to_remove != BACK:
                 del queue[to_remove]
                 console.print("[yellow]Removed.[/yellow]")
         elif action == "clear":
-            if inquirer.confirm(message="Clear entire queue?", default=False, instruction="(esc to cancel)", keybindings=_ESC_BACK, mandatory=False).execute():
+            if _fast_execute(inquirer.confirm(message="Clear entire queue?", default=False, instruction="(esc to cancel)", keybindings=_ESC_BACK, mandatory=False)):
                 queue.clear()
                 console.print("[yellow]Queue cleared.[/yellow]")
                 return
@@ -534,25 +545,25 @@ def edit_settings(config: Config) -> None:
         for code, label in FORMAT_LABELS.items()
     ]
 
-    new_format = inquirer.select(
+    new_format = _fast_execute(inquirer.select(
         message="Audio format",
         choices=format_choices,
         default=config.format,
         instruction="(esc to cancel)",
         keybindings=_ESC_BACK,
         mandatory=False,
-    ).execute()
+    ))
 
     if new_format is None:
         return
 
-    new_dir = inquirer.text(
+    new_dir = _fast_execute(inquirer.text(
         message="Output directory",
         default=config.output_dir,
         instruction="(esc to cancel)",
         keybindings=_ESC_BACK,
         mandatory=False,
-    ).execute()
+    ))
 
     if new_dir is None:
         return

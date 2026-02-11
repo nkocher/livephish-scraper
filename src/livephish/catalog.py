@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
 from pathlib import Path
 
@@ -14,7 +13,6 @@ from livephish.api import LivePhishAPI
 from livephish.config import CACHE_DIR
 from livephish.models import CatalogShow
 
-logger = logging.getLogger(__name__)
 console = Console()
 
 CACHE_FILE = CACHE_DIR / "catalog.json"
@@ -55,7 +53,6 @@ class Catalog:
         self.api = api
         self.shows: list[CatalogShow] = []
         self._by_year: dict[str, list[CatalogShow]] = {}
-        self._by_venue: dict[str, list[CatalogShow]] = {}
         self._search_corpus: dict[int, str] = {}
         self._search_shows: dict[int, CatalogShow] = {}
 
@@ -132,15 +129,11 @@ class Catalog:
             return None
 
     def _build_indexes(self) -> None:
-        """Build year and venue indexes."""
+        """Build year index and search corpus."""
         self._by_year = {}
-        self._by_venue = {}
         for show in self.shows:
             year = show.performance_date_year or "Unknown"
             self._by_year.setdefault(year, []).append(show)
-            venue_key = show.venue_name.lower()
-            if venue_key:
-                self._by_venue.setdefault(venue_key, []).append(show)
 
         # Precomputed search corpus for rapidfuzz
         self._search_corpus: dict[int, str] = {}

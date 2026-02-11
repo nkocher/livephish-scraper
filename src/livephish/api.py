@@ -17,7 +17,7 @@ CLIENT_ID = "Fujeij8d764ydxcnh4676scsr7f4"
 DEVELOPER_KEY = "njeurd876frhdjxy6sxxe721"
 SIG_KEY = "jdfirj8475jf_"
 USER_AGENT = "LivePhish/3.4.5.357 (Android; 7.1.2; Asus; ASUS_Z01QD)"
-API_BASE = "https://www.livephish.com/"
+API_BASE = "https://streamapi.livephish.com/"
 AUTH_BASE = "https://id.livephish.com/connect/"
 RATE_LIMIT_DELAY = 0.5
 MAX_RETRIES = 3
@@ -49,6 +49,8 @@ class LivePhishAPI:
         )
         self._access_token: str | None = None
         self._last_request_time: float = 0
+        self._email: str | None = None
+        self._password: str | None = None
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
@@ -56,14 +58,36 @@ class LivePhishAPI:
         if elapsed < RATE_LIMIT_DELAY:
             time.sleep(RATE_LIMIT_DELAY - elapsed)
 
-    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Make HTTP request with retry logic and rate limiting."""
-        self._rate_limit()
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        _rate_limit: bool = True,
+        _allow_reauth: bool = True,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Make HTTP request with retry logic, rate limiting, and re-auth."""
+        if _rate_limit:
+            self._rate_limit()
 
         for attempt in range(MAX_RETRIES):
             try:
                 response = self._client.request(method, url, **kwargs)
                 self._last_request_time = time.time()
+
+                # Re-auth on 401 if credentials are available
+                if (
+                    response.status_code == 401
+                    and _allow_reauth
+                    and self._email
+                    and self._password
+                ):
+                    self.login(self._email, self._password)
+                    return self._request(
+                        method, url, _rate_limit=_rate_limit, _allow_reauth=False, **kwargs
+                    )
+
                 return response
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 if attempt == MAX_RETRIES - 1:
@@ -91,6 +115,8 @@ class LivePhishAPI:
         response = self._request(
             "POST",
             f"{AUTH_BASE}token",
+            _rate_limit=False,
+            _allow_reauth=False,
             data={
                 "client_id": CLIENT_ID,
                 "grant_type": "password",
@@ -132,6 +158,8 @@ class LivePhishAPI:
         response = self._request(
             "GET",
             f"{API_BASE}secureApi.aspx",
+            _rate_limit=False,
+            _allow_reauth=False,
             params={
                 "method": "session.getUserToken",
                 "clientID": CLIENT_ID,
@@ -167,6 +195,8 @@ class LivePhishAPI:
         response = self._request(
             "GET",
             f"{API_BASE}secureApi.aspx",
+            _rate_limit=False,
+            _allow_reauth=False,
             params={
                 "method": "user.getSubscriberInfo",
                 "developerKey": DEVELOPER_KEY,
@@ -326,9 +356,8 @@ class LivePhishAPI:
     ) -> tuple[StreamParams, str]:
         """Try cached session first, fall back to full login.
 
-        Loads cached tokens and validates with an auth-required API call.
-        If the cache is missing, expired, or invalid, performs the full
-        3-step authentication and caches the new tokens.
+        Trusts cached tokens within TTL without a validation call.
+        Expired tokens are handled lazily via re-auth in _request().
 
         Returns:
             Tuple of (StreamParams, status_message)
@@ -338,6 +367,10 @@ class LivePhishAPI:
             load_session_cache,
             save_session_cache,
         )
+
+        # Store credentials for re-auth in _request()
+        self._email = email
+        self._password = password
 
         cached = load_session_cache()
         if cached:
@@ -351,10 +384,8 @@ class LivePhishAPI:
                     start_stamp=sp["start_stamp"],
                     end_stamp=sp["end_stamp"],
                 )
-                # Validate with an auth-required call
-                self.get_show_detail(cached.get("test_container_id", 1))
                 return params, "Cached session"
-            except (AuthError, APIError, KeyError, ValueError):
+            except (KeyError, ValueError):
                 clear_session_cache()
 
         # Full 3-step auth

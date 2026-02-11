@@ -32,7 +32,6 @@ pythonpath = ["src"]
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pytest-httpx>=0.30",
     "respx>=0.21",
     "pyinstaller>=6.0",
 ]
