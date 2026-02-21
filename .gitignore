@@ -1,16 +1,13 @@
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
+# Rust
+target/
+*.part
+
+# Build artifacts
 dist/
 build/
-.eggs/
-*.egg
-.venv/
+
+# Config
 .env
-*.part
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.spec
 CLAUDE.md
+.claude.local.md
+.worktrees/
