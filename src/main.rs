@@ -14,9 +14,7 @@ use tracing::info;
 
 use crate::api::NugsApi;
 use crate::browser::menu::run_browser;
-use crate::browser::resolve::{
-    print_resolution_warnings, resolve_tracks, retry_resolve_with_refresh,
-};
+use crate::browser::resolve::{print_resolution_warnings, resolve_tracks};
 use crate::catalog::Catalog;
 use crate::config::credentials::{get_credentials, get_credentials_for_service};
 use crate::config::{expand_tilde, load_config};
@@ -357,15 +355,7 @@ async fn run_download(
         .with_context(|| format!("Unknown format: {format_name}"))?;
 
     // Resolve stream URLs for all tracks with format fallback
-    let (mut tracks_with_urls, mut stats) = resolve_tracks(&show, &mut api, format_code).await;
-
-    // Retry with session refresh if all tracks failed and some had no URL
-    if tracks_with_urls.is_empty() && stats.no_stream_url > 0 {
-        let (retry_tracks, retry_stats) =
-            retry_resolve_with_refresh(&show, &mut api, format_code, "").await;
-        tracks_with_urls = retry_tracks;
-        stats = retry_stats;
-    }
+    let (tracks_with_urls, stats) = resolve_tracks(&show, &mut api, format_code).await;
 
     print_resolution_warnings(&stats, "");
 
@@ -488,15 +478,7 @@ async fn run_download_all(
 
         // Resolve tracks
         let api = router.api_for(catalog_show.service);
-        let (mut tracks_with_urls, mut stats) = resolve_tracks(&show, api, format_code).await;
-
-        if tracks_with_urls.is_empty() && stats.no_stream_url > 0 {
-            let api = router.api_for(catalog_show.service);
-            let (retry_tracks, retry_stats) =
-                retry_resolve_with_refresh(&show, api, format_code, "  ").await;
-            tracks_with_urls = retry_tracks;
-            stats = retry_stats;
-        }
+        let (tracks_with_urls, stats) = resolve_tracks(&show, api, format_code).await;
 
         print_resolution_warnings(&stats, "  ");
 

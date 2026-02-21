@@ -7,9 +7,7 @@ use crate::models::{CatalogShow, FormatCode};
 use crate::service::router::ServiceRouter;
 
 use super::prompt::{styled_confirm, styled_fuzzy, styled_select, PromptResult};
-use super::resolve::{
-    print_resolution_warnings, prompt_postprocess, resolve_tracks, retry_resolve_with_refresh,
-};
+use super::resolve::{print_resolution_warnings, prompt_postprocess, resolve_tracks};
 use super::style::{clear_screen, dim, format_show_label, print_section, MIDDOT};
 
 /// Return the display date for a show, or "Unknown date" if empty.
@@ -193,16 +191,7 @@ pub async fn download_queued_shows(
 
         // Resolve tracks
         let api = router.api_for(catalog_show.service);
-        let (mut tracks_with_urls, mut stats) = resolve_tracks(&show, api, format_code).await;
-
-        // Retry with refresh if all tracks failed and some had no URL
-        if tracks_with_urls.is_empty() && stats.no_stream_url > 0 {
-            let api = router.api_for(catalog_show.service);
-            let (retry_tracks, retry_stats) =
-                retry_resolve_with_refresh(&show, api, format_code, "  ").await;
-            tracks_with_urls = retry_tracks;
-            stats = retry_stats;
-        }
+        let (tracks_with_urls, stats) = resolve_tracks(&show, api, format_code).await;
 
         print_resolution_warnings(&stats, "  ");
 

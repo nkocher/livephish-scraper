@@ -1,4 +1,4 @@
-// Stream URL format fallback, retry with refresh, postprocess prompt
+// Stream URL format fallback, session probe, postprocess prompt
 
 use std::collections::HashMap;
 
@@ -85,12 +85,17 @@ pub async fn resolve_track_url(
 /// Resolve stream URLs for all tracks in a show, tracking format mismatches.
 ///
 /// Reads `api.stream_params` as the single source of truth.
+/// Probes the first track before the full loop — if it fails, attempts
+/// a session refresh (stale subscription timestamps are the common cause).
+/// On successful refresh, the remaining tracks resolve against fresh params.
+/// On failed refresh, continues with the original params (tracks will likely
+/// fail, but `print_resolution_warnings` will report the count).
 pub async fn resolve_tracks(
     show: &Show,
     api: &mut NugsApi,
     format_code: FormatCode,
 ) -> (TracksWithUrls, ResolveStats) {
-    let stream_params = match &api.stream_params {
+    let mut stream_params = match &api.stream_params {
         Some(sp) => sp.clone(),
         None => {
             return (
@@ -102,6 +107,35 @@ pub async fn resolve_tracks(
             );
         }
     };
+
+    if show.tracks.is_empty() {
+        return (
+            Vec::new(),
+            ResolveStats {
+                mismatch_counts: HashMap::new(),
+                no_stream_url: 0,
+            },
+        );
+    }
+
+    // Canary probe: test the first track to detect stale sessions early.
+    // If it fails, refresh the session before committing to the full loop.
+    // The probe result is reused in the loop to avoid a redundant API call.
+    let mut probe_result =
+        resolve_track_url(api, show.tracks[0].track_id, format_code, &stream_params).await;
+
+    if probe_result.is_none() {
+        match api.refresh_session().await {
+            Ok(new_params) => {
+                info!("Session refreshed (stale params detected)");
+                stream_params = new_params;
+            }
+            Err(e) => {
+                warn!("Session refresh failed: {e} — try restarting with: nugs -f");
+            }
+        }
+        // probe_result stays None — first track re-resolved in the loop
+    }
 
     let requested_format = format_code.name();
     let mut results: TracksWithUrls = Vec::new();
@@ -119,7 +153,14 @@ pub async fn resolve_tracks(
     );
 
     for track in &show.tracks {
-        match resolve_track_url(api, track.track_id, format_code, &stream_params).await {
+        // Reuse cached probe result on first iteration (if probe succeeded).
+        // .take() yields Some once, then None — subsequent tracks always resolve fresh.
+        let resolved = match probe_result.take() {
+            Some(r) => Some(r),
+            None => resolve_track_url(api, track.track_id, format_code, &stream_params).await,
+        };
+
+        match resolved {
             Some((url, quality)) => {
                 if quality.code != requested_format {
                     *mismatch_counts.entry(quality.code.to_string()).or_default() += 1;
@@ -139,35 +180,6 @@ pub async fn resolve_tracks(
         no_stream_url,
     };
     (results, stats)
-}
-
-/// Retry stream URL resolution after refreshing the session.
-///
-/// Called when initial resolution returns zero tracks with `no_stream_url > 0`,
-/// which typically indicates stale StreamParams (subscription timestamps
-/// embedded in URL query strings have expired).
-pub async fn retry_resolve_with_refresh(
-    show: &Show,
-    api: &mut NugsApi,
-    format_code: FormatCode,
-    indent: &str,
-) -> (TracksWithUrls, ResolveStats) {
-    println!("{indent}\x1b[2mRefreshing session and retrying...\x1b[0m");
-
-    match api.refresh_session().await {
-        Ok(_) => resolve_tracks(show, api, format_code).await,
-        Err(e) => {
-            println!("{indent}\x1b[38;5;214mSession refresh failed: {e}\x1b[0m");
-            println!("{indent}\x1b[2mTry restarting with: nugs -f\x1b[0m");
-            (
-                Vec::new(),
-                ResolveStats {
-                    mismatch_counts: HashMap::new(),
-                    no_stream_url: show.tracks.len(),
-                },
-            )
-        }
-    }
 }
 
 /// Print warnings about format mismatches, unknown formats, and failed tracks.

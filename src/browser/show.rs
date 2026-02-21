@@ -8,9 +8,7 @@ use crate::service::router::ServiceRouter;
 
 use super::prompt::{styled_fuzzy, styled_select, PromptResult};
 use super::queue::download_queued_shows;
-use super::resolve::{
-    print_resolution_warnings, prompt_postprocess, resolve_tracks, retry_resolve_with_refresh,
-};
+use super::resolve::{print_resolution_warnings, prompt_postprocess, resolve_tracks};
 use super::style::{
     clear_screen, dim, dot_leader_col_width, dot_leader_line, format_duration, format_show_label,
     is_queue_action, is_sort_toggle, print_section, queue_action_label, sort_toggle_label, MIDDOT,
@@ -298,16 +296,7 @@ async fn download_single(
     };
 
     let api = router.api_for(service);
-    let (mut tracks_with_urls, mut stats) = resolve_tracks(show, api, format_code).await;
-
-    // Retry with refresh if all tracks failed and some had no URL
-    if tracks_with_urls.is_empty() && stats.no_stream_url > 0 {
-        let api = router.api_for(service);
-        let (retry_tracks, retry_stats) =
-            retry_resolve_with_refresh(show, api, format_code, "").await;
-        tracks_with_urls = retry_tracks;
-        stats = retry_stats;
-    }
+    let (tracks_with_urls, stats) = resolve_tracks(show, api, format_code).await;
 
     print_resolution_warnings(&stats, "");
 
