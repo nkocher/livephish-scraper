@@ -11,9 +11,12 @@ use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 use crate::models::sanitize::sanitize_filename;
-use crate::models::{Quality, Show, Track};
+use crate::models::{FormatCode, Quality, Show, Track};
 use crate::service::Service;
-use crate::transcode::{check_ffmpeg, compute_final_path, is_already_converted, postprocess_aac};
+use crate::transcode::{
+    check_ffmpeg, compute_final_path, is_already_converted, postprocess_aac,
+    postprocess_flac_to_alac,
+};
 
 use self::escape::{disable_cbreak, enable_cbreak, new_cancel_flag, spawn_escape_watcher};
 use self::progress::make_overall_bar;
@@ -23,6 +26,29 @@ const MAX_CONCURRENT: usize = 3;
 
 /// Tracks with their resolved stream URLs and quality info.
 pub type TracksWithUrls = Vec<(Track, String, Quality)>;
+
+/// How a downloaded track should be post-processed.
+#[derive(Clone, Copy, PartialEq)]
+enum ConversionMode {
+    /// No conversion needed.
+    None,
+    /// AAC→FLAC or AAC→ALAC (controlled by postprocess_codec config).
+    AacPostprocess,
+    /// FLAC→ALAC (when ALAC requested but API serves FLAC).
+    FlacToAlac,
+}
+
+impl ConversionMode {
+    /// Run the appropriate postprocess conversion for this mode.
+    /// Returns `(final_path, error)` -- error is None on success.
+    fn postprocess(self, source: &Path, codec: &str) -> (PathBuf, Option<String>) {
+        match self {
+            Self::AacPostprocess => postprocess_aac(source, codec),
+            Self::FlacToAlac => postprocess_flac_to_alac(source),
+            Self::None => (source.to_path_buf(), None),
+        }
+    }
+}
 
 /// Format a track filename with leading number.
 pub fn make_track_filename(track_num: i64, title: &str, extension: &str) -> String {
@@ -35,19 +61,22 @@ pub fn make_track_filename(track_num: i64, title: &str, extension: &str) -> Stri
 }
 
 /// Check if a track is already fully processed and should be skipped.
-pub fn should_skip_track(
+fn should_skip_track(
     final_dest: &Path,
     download_dest: &Path,
-    needs_convert: bool,
-    postprocess_codec: &str,
+    conversion: ConversionMode,
 ) -> bool {
     if !final_dest.exists() {
         return false;
     }
-    if needs_convert && final_dest == download_dest && postprocess_codec == "alac" {
-        return is_already_converted(final_dest, "alac");
+    // For same-extension conversions, verify codec to avoid treating AAC .m4a as done
+    match conversion {
+        ConversionMode::AacPostprocess if final_dest == download_dest => {
+            is_already_converted(final_dest, "alac")
+        }
+        ConversionMode::FlacToAlac => is_already_converted(final_dest, "alac"),
+        _ => true,
     }
-    true
 }
 
 /// Return the .part path for a destination file.
@@ -139,6 +168,7 @@ pub async fn download_show(
     output_dir: &Path,
     postprocess_codec: &str,
     service: Service,
+    requested_format: FormatCode,
 ) -> bool {
     let show_dir = output_dir.join(show.folder_name());
     if let Err(e) = std::fs::create_dir_all(&show_dir) {
@@ -146,15 +176,20 @@ pub async fn download_show(
         return true;
     }
 
-    let effective_codec = if postprocess_codec != "none" && !check_ffmpeg() {
+    let has_ffmpeg = check_ffmpeg();
+
+    let effective_codec = if postprocess_codec != "none" && !has_ffmpeg {
         warn!("ffmpeg not found — AAC tracks will not be converted");
         "none"
     } else {
         postprocess_codec
     };
 
+    let flac_to_alac = requested_format == FormatCode::Alac;
+    let mut warned_no_ffmpeg_alac = false;
+
     // ── Phase 1: Pre-filter (skip/resume) ───────────────────────────
-    let mut to_download: Vec<(Track, String, Quality, PathBuf, bool)> = Vec::new();
+    let mut to_download: Vec<(Track, String, Quality, PathBuf, ConversionMode)> = Vec::new();
     let mut pre_completed = 0usize;
     let mut pre_skipped_names: Vec<String> = Vec::new();
 
@@ -166,23 +201,36 @@ pub async fn download_show(
 
         let filename = make_track_filename(track.track_num, &track.song_title, quality.extension);
         let download_dest = show_dir.join(&filename);
-        let needs_convert = effective_codec != "none" && quality.code == "aac";
-        let final_dest = if needs_convert {
-            compute_final_path(&download_dest, quality.code, effective_codec)
+
+        let conversion = if effective_codec != "none" && quality.code == "aac" {
+            ConversionMode::AacPostprocess
+        } else if flac_to_alac && quality.code == "flac" && has_ffmpeg {
+            ConversionMode::FlacToAlac
+        } else if flac_to_alac && quality.code == "flac" && !has_ffmpeg && !warned_no_ffmpeg_alac {
+            warn!("ffmpeg not found — FLAC tracks will not be converted to ALAC");
+            warned_no_ffmpeg_alac = true;
+            ConversionMode::None
         } else {
-            download_dest.clone()
+            ConversionMode::None
         };
 
+        let final_dest = compute_final_path(
+            &download_dest,
+            quality.code,
+            effective_codec,
+            conversion == ConversionMode::FlacToAlac,
+        );
+
         // Already fully processed
-        if should_skip_track(&final_dest, &download_dest, needs_convert, effective_codec) {
+        if should_skip_track(&final_dest, &download_dest, conversion) {
             pre_skipped_names.push(track.song_title.clone());
             pre_completed += 1;
             continue;
         }
 
         // Resume interrupted conversion
-        if needs_convert && download_dest.exists() {
-            let (actual, err) = postprocess_aac(&download_dest, effective_codec);
+        if conversion != ConversionMode::None && download_dest.exists() {
+            let (actual, err) = conversion.postprocess(&download_dest, effective_codec);
             if let Some(msg) = err {
                 warn!("Conversion resume failed: {} — {msg}", track.song_title);
             } else if let Err(e) = crate::tagger::tag_track(&actual, show, track) {
@@ -197,7 +245,7 @@ pub async fn download_show(
             url.clone(),
             quality.clone(),
             download_dest,
-            needs_convert,
+            conversion,
         ));
     }
 
@@ -245,7 +293,7 @@ pub async fn download_show(
 
     let mut handles = Vec::new();
 
-    for (track, url, _quality, download_dest, needs_convert) in to_download {
+    for (track, url, _quality, download_dest, conversion) in to_download {
         let sem = semaphore.clone();
         let cancel = cancel_flag.clone();
         let overall = overall_pb.clone();
@@ -287,17 +335,15 @@ pub async fn download_show(
             .await
             {
                 Ok(_) => {
-                    // Post-process if AAC conversion configured
-                    let actual_dest = if needs_convert {
-                        let (actual, err) = postprocess_aac(&download_dest, &codec_ref);
+                    // Post-process based on conversion mode
+                    let actual_dest = {
+                        let (actual, err) = conversion.postprocess(&download_dest, &codec_ref);
                         if let Some(msg) = err {
                             warn!("Conversion failed: {} — {msg}", track.song_title);
                             download_dest
                         } else {
                             actual
                         }
-                    } else {
-                        download_dest
                     };
 
                     // Tag

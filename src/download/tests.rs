@@ -73,8 +73,7 @@ fn test_should_skip_missing_final_dest() {
     assert!(!should_skip_track(
         &final_dest,
         &download_dest,
-        true,
-        "flac"
+        ConversionMode::AacPostprocess,
     ));
 }
 
@@ -83,7 +82,11 @@ fn test_should_skip_final_exists_no_convert() {
     let dir = tempdir().unwrap();
     let final_dest = dir.path().join("track.flac");
     std::fs::write(&final_dest, b"data").unwrap();
-    assert!(should_skip_track(&final_dest, &final_dest, false, "none"));
+    assert!(should_skip_track(
+        &final_dest,
+        &final_dest,
+        ConversionMode::None,
+    ));
 }
 
 #[test]
@@ -92,7 +95,11 @@ fn test_should_skip_flac_postprocess_done() {
     let final_dest = dir.path().join("track.flac");
     std::fs::write(&final_dest, b"flac data").unwrap();
     let download_dest = dir.path().join("track.m4a");
-    assert!(should_skip_track(&final_dest, &download_dest, true, "flac"));
+    assert!(should_skip_track(
+        &final_dest,
+        &download_dest,
+        ConversionMode::AacPostprocess,
+    ));
 }
 
 // ====================================

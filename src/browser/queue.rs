@@ -207,6 +207,7 @@ pub async fn download_queued_shows(
             &output_dir,
             &codec,
             catalog_show.service,
+            format_code,
         )
         .await;
         if completed {

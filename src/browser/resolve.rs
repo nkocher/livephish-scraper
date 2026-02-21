@@ -14,6 +14,18 @@ use crate::transcode::check_ffmpeg;
 use super::prompt::{styled_select, PromptResult};
 use super::style::dim;
 
+/// Check if a probe result indicates the session needs refreshing.
+///
+/// Returns true when the probe failed entirely (None) or when the API
+/// served AAC despite requesting a lossless format (quality mismatch
+/// caused by stale subscription params).
+pub fn probe_needs_refresh(probe: &Option<(String, Quality)>, format_code: FormatCode) -> bool {
+    match probe {
+        None => true,
+        Some((_, quality)) => format_code != FormatCode::Aac && quality.code == "aac",
+    }
+}
+
 /// Stats from resolving stream URLs for a show's tracks.
 pub struct ResolveStats {
     /// Format code -> count of tracks that got a different format than requested.
@@ -124,17 +136,26 @@ pub async fn resolve_tracks(
     let mut probe_result =
         resolve_track_url(api, show.tracks[0].track_id, format_code, &stream_params).await;
 
-    if probe_result.is_none() {
+    if probe_needs_refresh(&probe_result, format_code) {
         match api.refresh_session().await {
             Ok(new_params) => {
                 info!("Session refreshed (stale params detected)");
                 stream_params = new_params;
+                // Re-probe if we had a quality mismatch (None stays None for loop re-resolve)
+                if probe_result.is_some() {
+                    probe_result = resolve_track_url(
+                        api,
+                        show.tracks[0].track_id,
+                        format_code,
+                        &stream_params,
+                    )
+                    .await;
+                }
             }
             Err(e) => {
                 warn!("Session refresh failed: {e} — try restarting with: nugs -f");
             }
         }
-        // probe_result stays None — first track re-resolved in the loop
     }
 
     let requested_format = format_code.name();

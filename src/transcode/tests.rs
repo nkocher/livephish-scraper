@@ -11,26 +11,40 @@ use crate::transcode::*;
 #[test]
 fn test_compute_final_path_no_postprocess() {
     let path = Path::new("/tmp/track.m4a");
-    assert_eq!(compute_final_path(path, "aac", "none"), path);
+    assert_eq!(compute_final_path(path, "aac", "none", false), path);
 }
 
 #[test]
 fn test_compute_final_path_non_aac_quality() {
     let path = Path::new("/tmp/track.flac");
-    assert_eq!(compute_final_path(path, "flac", "flac"), path);
+    assert_eq!(compute_final_path(path, "flac", "flac", false), path);
 }
 
 #[test]
 fn test_compute_final_path_flac_postprocess() {
     let path = Path::new("/tmp/track.m4a");
     let expected = Path::new("/tmp/track.flac");
-    assert_eq!(compute_final_path(path, "aac", "flac"), expected);
+    assert_eq!(compute_final_path(path, "aac", "flac", false), expected);
 }
 
 #[test]
 fn test_compute_final_path_alac_keeps_m4a() {
     let path = Path::new("/tmp/track.m4a");
-    assert_eq!(compute_final_path(path, "aac", "alac"), path);
+    assert_eq!(compute_final_path(path, "aac", "alac", false), path);
+}
+
+#[test]
+fn test_compute_final_path_flac_to_alac() {
+    let path = Path::new("/tmp/track.flac");
+    let expected = Path::new("/tmp/track.m4a");
+    assert_eq!(compute_final_path(path, "flac", "none", true), expected);
+}
+
+#[test]
+fn test_compute_final_path_flac_to_alac_not_flac_quality() {
+    // flac_to_alac flag set but quality is aac — no conversion
+    let path = Path::new("/tmp/track.m4a");
+    assert_eq!(compute_final_path(path, "aac", "none", true), path);
 }
 
 // ====================================

@@ -1,11 +1,14 @@
 use crate::api::NugsApi;
 use crate::config::{expand_tilde, Config};
-use crate::download::{download_track, make_track_filename, should_skip_track};
+use crate::download::{download_track, make_track_filename};
 use crate::models::{FormatCode, Playlist};
-use crate::transcode::{check_ffmpeg, compute_final_path, postprocess_aac};
+use crate::transcode::{
+    check_ffmpeg, compute_final_path, is_already_converted, postprocess_aac,
+    postprocess_flac_to_alac,
+};
 
 use super::prompt::{styled_select, PromptResult};
-use super::resolve::{prompt_postprocess, resolve_track_url};
+use super::resolve::{probe_needs_refresh, prompt_postprocess, resolve_track_url};
 use super::style::{
     clear_screen, dim, dot_leader_col_width, dot_leader_line, format_duration, MIDDOT,
 };
@@ -85,6 +88,19 @@ fn print_playlist_panel(playlist: &Playlist) {
     println!();
 }
 
+/// Dispatch postprocessing: FLAC→ALAC or AAC→target codec.
+fn postprocess_track(
+    source: &std::path::Path,
+    codec: &str,
+    flac_to_alac: bool,
+) -> (std::path::PathBuf, Option<String>) {
+    if flac_to_alac {
+        postprocess_flac_to_alac(source)
+    } else {
+        postprocess_aac(source, codec)
+    }
+}
+
 /// Download all tracks in a playlist to a single folder.
 ///
 /// No tagging (tracks come from different shows). No queue interaction.
@@ -137,12 +153,13 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
     let mut failed = 0usize;
     let client = reqwest::Client::new();
 
-    // Probe first track to detect stale params
+    let flac_to_alac = format_code == FormatCode::Alac;
+    let has_ffmpeg = check_ffmpeg();
+
+    // Probe first track to detect stale params (including quality mismatch)
     let current_params = if let Some(first) = playlist.items.first() {
-        if resolve_track_url(api, first.track.track_id, format_code, &stream_params)
-            .await
-            .is_none()
-        {
+        let probe = resolve_track_url(api, first.track.track_id, format_code, &stream_params).await;
+        if probe_needs_refresh(&probe, format_code) {
             println!("  {}", dim("Refreshing session..."));
             let _ = api.refresh_session().await;
         }
@@ -186,22 +203,39 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
 
         let filename = make_track_filename((i + 1) as i64, &track.song_title, quality.extension);
         let download_dest = playlist_dir.join(&filename);
-        let needs_convert = effective_codec != "none" && quality.code == "aac";
-        let final_dest = compute_final_path(&download_dest, quality.code, &effective_codec);
 
-        if should_skip_track(&final_dest, &download_dest, needs_convert, &effective_codec) {
-            println!(
-                "  \x1b[2m[{}/{}] Already downloaded: {song}\x1b[0m",
-                i + 1,
-                total
-            );
-            skipped += 1;
-            continue;
+        let is_aac_convert = effective_codec != "none" && quality.code == "aac";
+        let is_flac_to_alac = flac_to_alac && quality.code == "flac" && has_ffmpeg;
+        let final_dest = compute_final_path(
+            &download_dest,
+            quality.code,
+            &effective_codec,
+            is_flac_to_alac,
+        );
+
+        // Skip check — verify codec for same-extension conversions
+        if final_dest.exists() {
+            let skip = if (is_aac_convert && final_dest == download_dest) || is_flac_to_alac {
+                is_already_converted(&final_dest, "alac")
+            } else {
+                true
+            };
+            if skip {
+                println!(
+                    "  \x1b[2m[{}/{}] Already downloaded: {song}\x1b[0m",
+                    i + 1,
+                    total
+                );
+                skipped += 1;
+                continue;
+            }
         }
+
+        let needs_convert = is_aac_convert || is_flac_to_alac;
 
         // Resume interrupted conversion
         if needs_convert && download_dest.exists() {
-            let (_, err) = postprocess_aac(&download_dest, &effective_codec);
+            let (_, err) = postprocess_track(&download_dest, &effective_codec, is_flac_to_alac);
             if let Some(msg) = err {
                 println!(
                     "  \x1b[38;5;214m[{}/{}] Conversion failed: {song} — {msg}\x1b[0m",
@@ -233,7 +267,8 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
         {
             Ok(_) => {
                 if needs_convert {
-                    let (_, err) = postprocess_aac(&download_dest, &effective_codec);
+                    let (_, err) =
+                        postprocess_track(&download_dest, &effective_codec, is_flac_to_alac);
                     if let Some(msg) = err {
                         println!("  \x1b[38;5;214mConversion warning: {msg}\x1b[0m");
                     }

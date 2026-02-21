@@ -83,20 +83,25 @@ pub fn is_already_converted(path: &Path, target_codec: &str) -> bool {
 
 /// Compute the file path after optional postprocessing.
 ///
-/// Only AAC tracks (.m4a) are affected. FLAC postprocess changes extension
-/// from .m4a to .flac. ALAC keeps .m4a (same extension, different codec).
+/// Handles two conversion paths:
+/// - AAC postprocess: .m4a→.flac (FLAC) or .m4a→.m4a (ALAC, same ext different codec)
+/// - FLAC→ALAC: .flac→.m4a (when user requests ALAC but API serves FLAC)
 pub fn compute_final_path(
     download_path: &Path,
     quality_code: &str,
     postprocess_codec: &str,
+    flac_to_alac: bool,
 ) -> PathBuf {
-    if postprocess_codec == "none" || quality_code != "aac" {
-        return download_path.to_path_buf();
+    if quality_code == "aac" && postprocess_codec != "none" {
+        if postprocess_codec == "flac" {
+            return download_path.with_extension("flac");
+        }
+        return download_path.to_path_buf(); // ALAC keeps .m4a
     }
-    if postprocess_codec == "flac" {
-        return download_path.with_extension("flac");
+    if flac_to_alac && quality_code == "flac" {
+        return download_path.with_extension("m4a");
     }
-    download_path.to_path_buf() // ALAC keeps .m4a
+    download_path.to_path_buf()
 }
 
 /// Convert an AAC .m4a file to the target codec.
@@ -120,6 +125,15 @@ pub fn postprocess_aac(source: &Path, target_codec: &str) -> (PathBuf, Option<St
         "alac" => transcode(source, source, "alac", ".m4a.converting"),
         _ => (source.to_path_buf(), None),
     }
+}
+
+/// Convert a FLAC file to ALAC (.m4a).
+///
+/// Lossless-to-lossless conversion, used when user requests ALAC but API serves FLAC.
+/// Returns `(final_path, error)` — error is None on success.
+pub fn postprocess_flac_to_alac(source: &Path) -> (PathBuf, Option<String>) {
+    let dest = source.with_extension("m4a");
+    transcode(source, &dest, "alac", ".m4a.converting")
 }
 
 /// Container format flag for ffmpeg's -f option.

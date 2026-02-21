@@ -377,6 +377,7 @@ async fn run_download(
         &output_dir,
         &cfg.postprocess_codec,
         Service::Nugs,
+        format_code,
     )
     .await;
 
@@ -494,6 +495,7 @@ async fn run_download_all(
             &output_dir,
             &cfg.postprocess_codec,
             catalog_show.service,
+            format_code,
         )
         .await;
 
