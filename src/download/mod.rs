@@ -4,6 +4,7 @@ pub mod progress;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use indicatif::ProgressBar;
@@ -23,6 +24,8 @@ use self::progress::make_overall_bar;
 
 const ESCAPE_CHECK_INTERVAL: usize = 64;
 const MAX_CONCURRENT: usize = 3;
+const DOWNLOAD_MAX_RETRIES: u32 = 2; // 3 total attempts
+const DOWNLOAD_RETRY_BASE_SECS: u64 = 3; // backoff: 3s, 6s
 
 /// Tracks with their resolved stream URLs and quality info.
 pub type TracksWithUrls = Vec<(Track, String, Quality)>;
@@ -144,6 +147,89 @@ pub async fn download_track(
     );
 
     Ok(dest.to_path_buf())
+}
+
+/// Check whether an error from `download_track` is worth retrying.
+///
+/// Retries transport failures (connect, timeout, body, decode) and server
+/// errors (5xx, 429). Fails fast on other 4xx — those indicate bad URLs or
+/// auth failures that won't resolve with a retry.
+fn is_retriable(err: &anyhow::Error) -> bool {
+    if let Some(re) = err.downcast_ref::<reqwest::Error>() {
+        if re.is_connect() || re.is_timeout() || re.is_body() || re.is_decode() {
+            return true;
+        }
+        if let Some(status) = re.status() {
+            return status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        }
+    }
+    false
+}
+
+/// Wrap `download_track` with exponential backoff + jitter.
+///
+/// On transient failures the same URL is retried — `__gda__` tokens are
+/// valid for days, so the issue is CDN rate-limiting, not stale URLs.
+/// The semaphore permit is held during backoff sleep, which naturally
+/// throttles concurrent activity against the rate-limited CDN.
+#[allow(clippy::too_many_arguments)]
+async fn download_track_with_retry(
+    url: &str,
+    dest: &Path,
+    cancel: &AtomicBool,
+    client: &reqwest::Client,
+    user_agent: &str,
+    referer: &str,
+    track_title: &str,
+    overall: &ProgressBar,
+    base_backoff: Duration,
+) -> Result<PathBuf, anyhow::Error> {
+    let mut last_err = None;
+
+    for attempt in 0..=DOWNLOAD_MAX_RETRIES {
+        if attempt > 0 {
+            // Jittered sleep: base * attempt ± 50%
+            let base_ms = base_backoff.as_millis() as u64 * attempt as u64;
+            let jitter_range = (base_ms / 2).max(1);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as u64;
+            let jitter = (nanos % (jitter_range * 2)) as i64 - jitter_range as i64;
+            let sleep_ms = (base_ms as i64 + jitter).max(0) as u64;
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+
+            if cancel.load(Ordering::Relaxed) {
+                return Err(anyhow::anyhow!("download cancelled"));
+            }
+        }
+
+        let hidden_pb = ProgressBar::hidden();
+        match download_track(url, dest, &hidden_pb, cancel, client, user_agent, referer).await {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                if e.to_string().contains("cancelled") {
+                    return Err(e);
+                }
+                if !is_retriable(&e) || attempt == DOWNLOAD_MAX_RETRIES {
+                    return Err(e);
+                }
+                warn!(
+                    "Attempt {}/{} failed for {}: {e}",
+                    attempt + 1,
+                    DOWNLOAD_MAX_RETRIES + 1,
+                    track_title,
+                );
+                overall.println(format!(
+                    "  \x1b[2m\u{21bb} Retrying {}...\x1b[0m",
+                    track_title
+                ));
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("download failed")))
 }
 
 /// Result of downloading + processing a single track.
@@ -289,7 +375,10 @@ pub async fn download_show(
     let semaphore = Arc::new(Semaphore::new(concurrent));
     let show_arc = Arc::new(show.clone());
     let codec = effective_codec.to_string();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .unwrap();
 
     let mut handles = Vec::new();
 
@@ -318,19 +407,16 @@ pub async fn download_show(
                 return TrackResult::Cancelled;
             }
 
-            // Use a hidden bar for download_track's internal progress/cancel checks.
-            // Per-track byte progress is not displayed — the overall bar + completion
-            // messages provide the user-facing feedback.
-            let hidden_pb = ProgressBar::hidden();
-
-            match download_track(
+            match download_track_with_retry(
                 &url,
                 &download_dest,
-                &hidden_pb,
                 &cancel,
                 &client_ref,
                 stream_ua,
                 referer,
+                &track.song_title,
+                &overall,
+                Duration::from_secs(DOWNLOAD_RETRY_BASE_SECS),
             )
             .await
             {

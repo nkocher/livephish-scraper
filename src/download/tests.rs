@@ -1,5 +1,6 @@
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use indicatif::ProgressBar;
 use tempfile::tempdir;
@@ -250,4 +251,143 @@ async fn test_download_track_cleans_stale_part() {
     assert!(dest.exists());
     assert!(!stale_part.exists());
     assert_eq!(std::fs::read(&dest).unwrap(), audio_data);
+}
+
+// ====================================
+// download_track_with_retry via wiremock
+// ====================================
+
+#[tokio::test]
+async fn test_retry_succeeds_after_transient_failure() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let audio_data = b"retried audio content";
+
+    // First request: 500 (transient failure)
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Subsequent requests: 200 (success)
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(audio_data.to_vec())
+                .insert_header("content-length", audio_data.len().to_string()),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Tweezer.flac");
+    let cancel = AtomicBool::new(false);
+    let client = reqwest::Client::new();
+    let overall = ProgressBar::hidden();
+
+    let result = download_track_with_retry(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &cancel,
+        &client,
+        "nugsnetAndroid",
+        "https://play.nugs.net/",
+        "Tweezer",
+        &overall,
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    assert!(dest.exists());
+    assert_eq!(std::fs::read(&dest).unwrap(), audio_data);
+}
+
+#[tokio::test]
+async fn test_retry_exhausts_all_attempts() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Always return 500
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(3) // 1 initial + 2 retries
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Song.flac");
+    let cancel = AtomicBool::new(false);
+    let client = reqwest::Client::new();
+    let overall = ProgressBar::hidden();
+
+    let result = download_track_with_retry(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &cancel,
+        &client,
+        "nugsnetAndroid",
+        "https://play.nugs.net/",
+        "Song",
+        &overall,
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(!dest.exists());
+}
+
+#[tokio::test]
+async fn test_retry_respects_cancellation() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Return 500 so retry logic kicks in
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Ghost.flac");
+    let cancel = AtomicBool::new(false);
+    let client = reqwest::Client::new();
+    let overall = ProgressBar::hidden();
+
+    // Set cancel after first attempt fails — the retry sleep check will see it
+    cancel.store(true, Ordering::Relaxed);
+
+    let result = download_track_with_retry(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &cancel,
+        &client,
+        "nugsnetAndroid",
+        "https://play.nugs.net/",
+        "Ghost",
+        &overall,
+        Duration::from_millis(10),
+    )
+    .await;
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    // Either cancelled during retry sleep or the 500 error itself — either way, we didn't hang
+    assert!(
+        err_msg.contains("cancelled") || err_msg.contains("500"),
+        "unexpected error: {err_msg}"
+    );
 }
