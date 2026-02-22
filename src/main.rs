@@ -18,7 +18,7 @@ use crate::browser::resolve::{print_resolution_warnings, resolve_tracks};
 use crate::catalog::Catalog;
 use crate::config::credentials::{get_credentials, get_credentials_for_service};
 use crate::config::{expand_tilde, load_config};
-use crate::download::download_show;
+use crate::download::{download_show, download_show_with_retry};
 use crate::models::show::DisplayLocation;
 use crate::models::FormatCode;
 use crate::service::router::ServiceRouter;
@@ -371,7 +371,7 @@ async fn run_download(
     );
 
     // Download all tracks (CLI download is always nugs.net)
-    let completed = download_show(
+    let outcome = download_show(
         &show,
         &tracks_with_urls,
         &output_dir,
@@ -381,7 +381,7 @@ async fn run_download(
     )
     .await;
 
-    if completed {
+    if outcome.completed {
         println!("Done!");
     } else {
         println!("Download cancelled.");
@@ -489,21 +489,27 @@ async fn run_download_all(
             continue;
         }
 
-        let completed = download_show(
+        let outcome = download_show_with_retry(
             &show,
             &tracks_with_urls,
             &output_dir,
             &cfg.postprocess_codec,
             catalog_show.service,
             format_code,
+            std::time::Duration::from_secs(30),
         )
         .await;
 
-        if completed {
+        if outcome.completed {
             downloaded += 1;
         } else {
             // User cancelled
             break;
+        }
+
+        // Inter-show cooldown (skip after last show)
+        if i + 1 < shows_owned.len() {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
 

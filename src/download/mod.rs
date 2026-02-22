@@ -24,11 +24,19 @@ use self::progress::make_overall_bar;
 
 const ESCAPE_CHECK_INTERVAL: usize = 64;
 const MAX_CONCURRENT: usize = 3;
-const DOWNLOAD_MAX_RETRIES: u32 = 2; // 3 total attempts
-const DOWNLOAD_RETRY_BASE_SECS: u64 = 3; // backoff: 3s, 6s
+const DOWNLOAD_MAX_RETRIES: u32 = 3; // 4 total attempts
+const DOWNLOAD_RETRY_BASE_SECS: u64 = 5; // backoff: 5s, 10s, 15s
 
 /// Tracks with their resolved stream URLs and quality info.
 pub type TracksWithUrls = Vec<(Track, String, Quality)>;
+
+/// Outcome of downloading a show.
+pub struct DownloadOutcome {
+    /// false = user cancelled via Escape.
+    pub completed: bool,
+    /// Number of tracks that failed to download.
+    pub failed_count: usize,
+}
 
 /// How a downloaded track should be post-processed.
 #[derive(Clone, Copy, PartialEq)]
@@ -247,7 +255,7 @@ enum TrackResult {
 /// Downloads up to 3 tracks concurrently. Uses a single overall progress
 /// bar with `pb.println()` for per-track completion messages. This avoids
 /// MultiProgress rendering issues with concurrent bar insertion/removal.
-/// Returns true if completed normally, false if user cancelled via Escape.
+/// Returns a `DownloadOutcome` with completion status and failure count.
 pub async fn download_show(
     show: &Show,
     tracks_with_urls: &TracksWithUrls,
@@ -255,11 +263,11 @@ pub async fn download_show(
     postprocess_codec: &str,
     service: Service,
     requested_format: FormatCode,
-) -> bool {
+) -> DownloadOutcome {
     let show_dir = output_dir.join(show.folder_name());
     if let Err(e) = std::fs::create_dir_all(&show_dir) {
         error!("Failed to create show directory: {e}");
-        return true;
+        return DownloadOutcome { completed: true, failed_count: 0 };
     }
 
     let has_ffmpeg = check_ffmpeg();
@@ -348,7 +356,7 @@ pub async fn download_show(
     }
 
     if to_download.is_empty() {
-        return true;
+        return DownloadOutcome { completed: true, failed_count: 0 };
     }
 
     // ── Phase 2: Parallel download ──────────────────────────────────
@@ -524,7 +532,71 @@ pub async fn download_show(
         );
     }
 
-    !cancelled
+    DownloadOutcome {
+        completed: !cancelled,
+        failed_count: failed.len(),
+    }
+}
+
+/// Retry wrapper around `download_show` for bulk downloads.
+///
+/// Calls `download_show` up to 3 times total. Between passes, tracks that
+/// succeeded on earlier passes are automatically skipped by `should_skip_track`.
+/// Aborts early if no progress is made (same failure count as previous pass).
+pub async fn download_show_with_retry(
+    show: &Show,
+    tracks_with_urls: &TracksWithUrls,
+    output_dir: &Path,
+    postprocess_codec: &str,
+    service: Service,
+    requested_format: FormatCode,
+    pass_cooldown: Duration,
+) -> DownloadOutcome {
+    const MAX_SHOW_RETRIES: u32 = 2; // 3 total passes
+
+    let mut prev_failed = usize::MAX;
+
+    for pass in 0..=MAX_SHOW_RETRIES {
+        let outcome = download_show(
+            show,
+            tracks_with_urls,
+            output_dir,
+            postprocess_codec,
+            service,
+            requested_format,
+        )
+        .await;
+
+        if !outcome.completed {
+            return outcome; // user cancelled
+        }
+
+        if outcome.failed_count == 0 {
+            return outcome; // all tracks succeeded
+        }
+
+        // No progress — same or more failures than last pass
+        if outcome.failed_count >= prev_failed {
+            return outcome;
+        }
+
+        prev_failed = outcome.failed_count;
+
+        if pass < MAX_SHOW_RETRIES {
+            println!(
+                "  \x1b[38;5;214m\u{21bb} Retrying {} failed track{} in {}s...\x1b[0m",
+                outcome.failed_count,
+                if outcome.failed_count != 1 { "s" } else { "" },
+                pass_cooldown.as_secs(),
+            );
+            tokio::time::sleep(pass_cooldown).await;
+        } else {
+            return outcome;
+        }
+    }
+
+    // Unreachable, but satisfies the compiler
+    DownloadOutcome { completed: true, failed_count: prev_failed }
 }
 
 #[cfg(test)]

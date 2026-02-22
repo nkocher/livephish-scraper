@@ -3,9 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indicatif::ProgressBar;
+use serde_json::json;
 use tempfile::tempdir;
 
 use super::*;
+use crate::models::Show;
 
 /// Create a hidden progress bar, a non-cancelled flag, and a client for testing.
 fn test_fixtures() -> (ProgressBar, AtomicBool, reqwest::Client) {
@@ -320,7 +322,7 @@ async fn test_retry_exhausts_all_attempts() {
     Mock::given(method("GET"))
         .and(path("/track.flac"))
         .respond_with(ResponseTemplate::new(500))
-        .expect(3) // 1 initial + 2 retries
+        .expect(4) // 1 initial + 3 retries
         .mount(&server)
         .await;
 
@@ -389,5 +391,163 @@ async fn test_retry_respects_cancellation() {
     assert!(
         err_msg.contains("cancelled") || err_msg.contains("500"),
         "unexpected error: {err_msg}"
+    );
+}
+
+// ====================================
+// download_show_with_retry via wiremock
+// ====================================
+
+/// Helper: build a minimal Show + TracksWithUrls for integration tests.
+fn make_test_show_and_tracks(
+    server_uri: &str,
+    track_paths: &[&str],
+) -> (Show, TracksWithUrls) {
+    let tracks_json: Vec<serde_json::Value> = track_paths
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            json!({
+                "trackID": i + 1,
+                "setNum": 1,
+                "songTitle": format!("Track {}", i + 1),
+                "trackNum": i + 1,
+            })
+        })
+        .collect();
+
+    let show = Show::from_json(&json!({
+        "containerID": 99999,
+        "artistName": "Test Artist",
+        "containerInfo": "Test Show",
+        "venueName": "Test Venue",
+        "venueCity": "Test City",
+        "venueState": "TS",
+        "performanceDate": "2024-01-01",
+        "performanceDateFormatted": "01/01/2024",
+        "performanceDateYear": "2024",
+        "tracks": tracks_json,
+    }));
+
+    let quality = crate::models::Quality {
+        code: "flac",
+        specs: "16/44",
+        extension: ".flac",
+    };
+
+    let tracks_with_urls: TracksWithUrls = show
+        .tracks
+        .iter()
+        .zip(track_paths.iter())
+        .map(|(track, path)| {
+            (track.clone(), format!("{}{}", server_uri, path), quality.clone())
+        })
+        .collect();
+
+    (show, tracks_with_urls)
+}
+
+#[tokio::test]
+async fn test_show_retry_recovers_failed_tracks() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let audio_ok = b"good audio data";
+    let audio_recovered = b"recovered audio";
+
+    // Track 1: always succeeds
+    Mock::given(method("GET"))
+        .and(path("/track1.flac"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(audio_ok.to_vec())
+                .insert_header("content-length", audio_ok.len().to_string()),
+        )
+        .mount(&server)
+        .await;
+
+    // Track 2: fails on first 4 attempts (per-track retry budget), succeeds after
+    Mock::given(method("GET"))
+        .and(path("/track2.flac"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(4) // exhaust per-track retry (1 initial + 3 retries)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/track2.flac"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(audio_recovered.to_vec())
+                .insert_header("content-length", audio_recovered.len().to_string()),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let (show, tracks) =
+        make_test_show_and_tracks(&server.uri(), &["/track1.flac", "/track2.flac"]);
+
+    let outcome = download_show_with_retry(
+        &show,
+        &tracks,
+        dir.path(),
+        "none",
+        crate::service::Service::Nugs,
+        crate::models::FormatCode::Flac,
+        Duration::ZERO, // no cooldown in tests
+    )
+    .await;
+
+    assert!(outcome.completed);
+    assert_eq!(outcome.failed_count, 0, "second pass should recover the failed track");
+
+    // Both track files should exist
+    let show_dir = dir.path().join(show.folder_name());
+    assert!(show_dir.join("01. Track 1.flac").exists());
+    assert!(show_dir.join("02. Track 2.flac").exists());
+}
+
+#[tokio::test]
+async fn test_show_retry_aborts_on_no_progress() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    // Track always returns 500 — no progress possible
+    Mock::given(method("GET"))
+        .and(path("/track1.flac"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let (show, tracks) = make_test_show_and_tracks(&server.uri(), &["/track1.flac"]);
+
+    let outcome = download_show_with_retry(
+        &show,
+        &tracks,
+        dir.path(),
+        "none",
+        crate::service::Service::Nugs,
+        crate::models::FormatCode::Flac,
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(outcome.completed, "should not report cancellation");
+    assert_eq!(outcome.failed_count, 1, "track should still be failed");
+
+    // Verify we didn't retry endlessly — the no-progress guard should
+    // abort after pass 2 (same failure count as pass 1).
+    // The mock server received: pass1 (4 hits) + pass2 (4 hits) = 8 total.
+    // Without the guard it would be: pass1 (4) + pass2 (4) + pass3 (4) = 12.
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests.len() <= 8,
+        "expected at most 8 requests (2 passes × 4 attempts), got {}",
+        requests.len()
     );
 }

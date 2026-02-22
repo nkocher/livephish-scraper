@@ -1,7 +1,9 @@
 use indexmap::IndexMap;
 
+use std::time::Duration;
+
 use crate::config::{expand_tilde, Config};
-use crate::download::download_show;
+use crate::download::download_show_with_retry;
 use crate::models::show::DisplayLocation;
 use crate::models::{CatalogShow, FormatCode};
 use crate::service::router::ServiceRouter;
@@ -154,6 +156,7 @@ pub async fn download_queued_shows(
     let total_shows = queue.len();
     let mut downloaded_shows = 0usize;
     let mut skipped_shows = 0usize;
+    let mut any_failures = false;
 
     // Collect show data up front to avoid borrow issues during iteration
     let shows: Vec<(i64, CatalogShow)> =
@@ -201,20 +204,29 @@ pub async fn download_queued_shows(
             continue;
         }
 
-        let completed = download_show(
+        let outcome = download_show_with_retry(
             &show,
             &tracks_with_urls,
             &output_dir,
             &codec,
             catalog_show.service,
             format_code,
+            Duration::from_secs(30),
         )
         .await;
-        if completed {
-            downloaded_shows += 1;
-        } else {
+
+        if !outcome.completed {
             // User cancelled — stop remaining shows
             break;
+        }
+        downloaded_shows += 1;
+        if outcome.failed_count > 0 {
+            any_failures = true;
+        }
+
+        // Inter-show cooldown (skip after last show)
+        if i + 1 < shows.len() {
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
@@ -227,8 +239,8 @@ pub async fn download_queued_shows(
     }
     println!("{}", parts.join(", "));
 
-    // Clear queue only if all shows completed
-    if skipped_shows == 0 && downloaded_shows == total_shows {
+    // Clear queue only if all shows completed with no residual failures
+    if skipped_shows == 0 && downloaded_shows == total_shows && !any_failures {
         queue.clear();
     }
 

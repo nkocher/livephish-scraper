@@ -305,9 +305,9 @@ async fn download_single(
         return;
     }
 
-    let completed =
+    let outcome =
         download_show(show, &tracks_with_urls, &output_dir, &codec, service, format_code).await;
-    if completed {
+    if outcome.completed {
         println!("\x1b[1;38;5;113mDownload complete!\x1b[0m");
     }
 }
