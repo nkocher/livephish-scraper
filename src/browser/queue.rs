@@ -209,6 +209,7 @@ pub async fn download_queued_shows(
             &tracks_with_urls,
             &output_dir,
             &codec,
+            &config.flac_convert,
             catalog_show.service,
             format_code,
             Duration::from_secs(30),

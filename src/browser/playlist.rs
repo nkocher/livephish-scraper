@@ -3,8 +3,8 @@ use crate::config::{expand_tilde, Config};
 use crate::download::{download_track, make_track_filename};
 use crate::models::{FormatCode, Playlist};
 use crate::transcode::{
-    check_ffmpeg, compute_final_path, is_already_converted, postprocess_aac,
-    postprocess_flac_to_alac,
+    check_ffmpeg, compute_final_path, effective_flac_target, is_already_converted, postprocess_aac,
+    postprocess_flac_to_aac, postprocess_flac_to_alac,
 };
 
 use super::prompt::{styled_select, PromptResult};
@@ -88,16 +88,16 @@ fn print_playlist_panel(playlist: &Playlist) {
     println!();
 }
 
-/// Dispatch postprocessing: FLAC→ALAC or AAC→target codec.
+/// Dispatch postprocessing: FLAC→ALAC/AAC or AAC→target codec.
 fn postprocess_track(
     source: &std::path::Path,
     codec: &str,
-    flac_to_alac: bool,
+    flac_target: &str,
 ) -> (std::path::PathBuf, Option<String>) {
-    if flac_to_alac {
-        postprocess_flac_to_alac(source)
-    } else {
-        postprocess_aac(source, codec)
+    match flac_target {
+        "alac" => postprocess_flac_to_alac(source),
+        "aac" => postprocess_flac_to_aac(source),
+        _ => postprocess_aac(source, codec),
     }
 }
 
@@ -153,7 +153,7 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
     let mut failed = 0usize;
     let client = reqwest::Client::new();
 
-    let flac_to_alac = format_code == FormatCode::Alac;
+    let flac_target = effective_flac_target(&config.flac_convert, format_code.name());
     let has_ffmpeg = check_ffmpeg();
 
     // Probe first track to detect stale params (including quality mismatch)
@@ -205,18 +205,21 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
         let download_dest = playlist_dir.join(&filename);
 
         let is_aac_convert = effective_codec != "none" && quality.code == "aac";
-        let is_flac_to_alac = flac_to_alac && quality.code == "flac" && has_ffmpeg;
+        let is_flac_convert = quality.code == "flac" && flac_target != "none" && has_ffmpeg;
+        let effective_flac_target = if is_flac_convert { flac_target } else { "none" };
         let final_dest = compute_final_path(
             &download_dest,
             quality.code,
             &effective_codec,
-            is_flac_to_alac,
+            effective_flac_target,
         );
 
         // Skip check — verify codec for same-extension conversions
         if final_dest.exists() {
-            let skip = if (is_aac_convert && final_dest == download_dest) || is_flac_to_alac {
+            let skip = if is_aac_convert && final_dest == download_dest {
                 is_already_converted(&final_dest, "alac")
+            } else if is_flac_convert {
+                is_already_converted(&final_dest, flac_target)
             } else {
                 true
             };
@@ -231,11 +234,11 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
             }
         }
 
-        let needs_convert = is_aac_convert || is_flac_to_alac;
+        let needs_convert = is_aac_convert || is_flac_convert;
 
         // Resume interrupted conversion
         if needs_convert && download_dest.exists() {
-            let (_, err) = postprocess_track(&download_dest, &effective_codec, is_flac_to_alac);
+            let (_, err) = postprocess_track(&download_dest, &effective_codec, effective_flac_target);
             if let Some(msg) = err {
                 println!(
                     "  \x1b[38;5;214m[{}/{}] Conversion failed: {song} — {msg}\x1b[0m",
@@ -268,7 +271,7 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
             Ok(_) => {
                 if needs_convert {
                     let (_, err) =
-                        postprocess_track(&download_dest, &effective_codec, is_flac_to_alac);
+                        postprocess_track(&download_dest, &effective_codec, effective_flac_target);
                     if let Some(msg) = err {
                         println!("  \x1b[38;5;214mConversion warning: {msg}\x1b[0m");
                     }

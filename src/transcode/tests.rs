@@ -11,40 +11,86 @@ use crate::transcode::*;
 #[test]
 fn test_compute_final_path_no_postprocess() {
     let path = Path::new("/tmp/track.m4a");
-    assert_eq!(compute_final_path(path, "aac", "none", false), path);
+    assert_eq!(compute_final_path(path, "aac", "none", "none"), path);
 }
 
 #[test]
 fn test_compute_final_path_non_aac_quality() {
     let path = Path::new("/tmp/track.flac");
-    assert_eq!(compute_final_path(path, "flac", "flac", false), path);
+    assert_eq!(compute_final_path(path, "flac", "flac", "none"), path);
 }
 
 #[test]
 fn test_compute_final_path_flac_postprocess() {
     let path = Path::new("/tmp/track.m4a");
     let expected = Path::new("/tmp/track.flac");
-    assert_eq!(compute_final_path(path, "aac", "flac", false), expected);
+    assert_eq!(compute_final_path(path, "aac", "flac", "none"), expected);
 }
 
 #[test]
 fn test_compute_final_path_alac_keeps_m4a() {
     let path = Path::new("/tmp/track.m4a");
-    assert_eq!(compute_final_path(path, "aac", "alac", false), path);
+    assert_eq!(compute_final_path(path, "aac", "alac", "none"), path);
 }
 
 #[test]
 fn test_compute_final_path_flac_to_alac() {
     let path = Path::new("/tmp/track.flac");
     let expected = Path::new("/tmp/track.m4a");
-    assert_eq!(compute_final_path(path, "flac", "none", true), expected);
+    assert_eq!(compute_final_path(path, "flac", "none", "alac"), expected);
 }
 
 #[test]
 fn test_compute_final_path_flac_to_alac_not_flac_quality() {
-    // flac_to_alac flag set but quality is aac — no conversion
+    // flac_target set to alac but quality is aac — no conversion
     let path = Path::new("/tmp/track.m4a");
-    assert_eq!(compute_final_path(path, "aac", "none", true), path);
+    assert_eq!(compute_final_path(path, "aac", "none", "alac"), path);
+}
+
+#[test]
+fn test_compute_final_path_flac_to_aac() {
+    let path = Path::new("/tmp/track.flac");
+    let expected = Path::new("/tmp/track.m4a");
+    assert_eq!(compute_final_path(path, "flac", "none", "aac"), expected);
+}
+
+#[test]
+fn test_compute_final_path_flac_to_aac_not_flac_quality() {
+    // flac_target set to aac but quality is aac — no conversion
+    let path = Path::new("/tmp/track.m4a");
+    assert_eq!(compute_final_path(path, "aac", "none", "aac"), path);
+}
+
+// ====================================
+// effective_flac_target
+// ====================================
+
+#[test]
+fn test_effective_flac_target_none_with_alac_format() {
+    // Implicit ALAC fallback: flac_convert="none" + format=alac → "alac"
+    assert_eq!(effective_flac_target("none", "alac"), "alac");
+}
+
+#[test]
+fn test_effective_flac_target_none_with_flac_format() {
+    // No conversion: flac_convert="none" + format=flac → "none"
+    assert_eq!(effective_flac_target("none", "flac"), "none");
+}
+
+#[test]
+fn test_effective_flac_target_explicit_aac_overrides_alac() {
+    // Explicit "aac" takes priority over implicit ALAC
+    assert_eq!(effective_flac_target("aac", "alac"), "aac");
+}
+
+#[test]
+fn test_effective_flac_target_explicit_alac() {
+    assert_eq!(effective_flac_target("alac", "flac"), "alac");
+}
+
+#[test]
+fn test_effective_flac_target_explicit_aac_with_flac_format() {
+    assert_eq!(effective_flac_target("aac", "flac"), "aac");
 }
 
 // ====================================
@@ -89,7 +135,7 @@ fn test_postprocess_aac_unknown_codec_passthrough() {
 // ====================================
 
 #[test]
-fn test_is_already_converted_non_alac_target() {
+fn test_is_already_converted_unsupported_target() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("track.m4a");
     std::fs::write(&path, b"data").unwrap();
@@ -101,6 +147,12 @@ fn test_is_already_converted_non_alac_target() {
 fn test_is_already_converted_nonexistent_file() {
     let path = Path::new("/nonexistent/track.m4a");
     assert!(!is_already_converted(path, "alac"));
+}
+
+#[test]
+fn test_is_already_converted_aac_nonexistent() {
+    let path = Path::new("/nonexistent/track.m4a");
+    assert!(!is_already_converted(path, "aac"));
 }
 
 // ====================================
@@ -144,6 +196,11 @@ fn test_container_format_flac() {
 #[test]
 fn test_container_format_alac() {
     assert_eq!(container_format("alac"), Some("ipod"));
+}
+
+#[test]
+fn test_container_format_aac() {
+    assert_eq!(container_format("aac"), Some("ipod"));
 }
 
 #[test]

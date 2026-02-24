@@ -494,6 +494,7 @@ async fn test_show_retry_recovers_failed_tracks() {
         &tracks,
         dir.path(),
         "none",
+        "none",
         crate::service::Service::Nugs,
         crate::models::FormatCode::Flac,
         Duration::ZERO, // no cooldown in tests
@@ -530,6 +531,7 @@ async fn test_show_retry_aborts_on_no_progress() {
         &show,
         &tracks,
         dir.path(),
+        "none",
         "none",
         crate::service::Service::Nugs,
         crate::models::FormatCode::Flac,

@@ -20,11 +20,18 @@ pub fn edit_settings(config: &mut Config) {
             _ => "None",
         };
 
+        let flac_convert_display = match config.flac_convert.as_str() {
+            "alac" => "Convert to ALAC",
+            "aac" => "Convert to AAC (256 kbps)",
+            _ => "None",
+        };
+
         print_section("Settings", None);
 
         let choices = vec![
             format!("Audio format        [{format_display}]"),
             format!("AAC conversion      [{postprocess_display}]"),
+            format!("FLAC conversion     [{flac_convert_display}]"),
             format!("Output directory     [{}]", config.output_dir),
         ];
 
@@ -34,6 +41,8 @@ pub fn edit_settings(config: &mut Config) {
                     edit_format(config);
                 } else if choice.starts_with("AAC conversion") {
                     edit_postprocess(config);
+                } else if choice.starts_with("FLAC conversion") {
+                    edit_flac_convert(config);
                 } else if choice.starts_with("Output directory") {
                     edit_output_dir(config);
                 }
@@ -104,6 +113,42 @@ fn edit_postprocess(config: &mut Config) {
                 save_config(config);
             }
             println!("\x1b[38;5;113mAAC conversion saved.\x1b[0m");
+        }
+        PromptResult::Back | PromptResult::Interrupted => {}
+    }
+}
+
+/// Edit FLAC conversion setting (FLAC → ALAC or AAC).
+fn edit_flac_convert(config: &mut Config) {
+    let choices = vec![
+        "None (keep FLAC)".to_string(),
+        "Convert to ALAC (lossless)".to_string(),
+        "Convert to AAC (256 kbps)".to_string(),
+    ];
+
+    match styled_select("FLAC conversion:", choices) {
+        PromptResult::Choice(choice) => {
+            let target = match choice {
+                s if s.contains("ALAC") => "alac",
+                s if s.contains("AAC") => "aac",
+                _ => "none",
+            };
+
+            let effective = if target != "none" && !check_ffmpeg() {
+                println!(
+                    "\x1b[38;5;214mffmpeg not found \u{2014} FLAC tracks will not be converted.\x1b[0m"
+                );
+                println!("  {}", dim("Install ffmpeg and ensure it's on your PATH."));
+                "none"
+            } else {
+                target
+            };
+
+            if effective != config.flac_convert {
+                config.flac_convert = effective.to_string();
+                save_config(config);
+            }
+            println!("\x1b[38;5;113mFLAC conversion saved.\x1b[0m");
         }
         PromptResult::Back | PromptResult::Interrupted => {}
     }

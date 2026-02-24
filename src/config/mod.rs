@@ -38,6 +38,9 @@ pub struct Config {
     #[serde(default = "default_none_string")]
     pub postprocess_codec: String,
 
+    #[serde(default = "default_none_string")]
+    pub flac_convert: String,
+
     #[serde(default)]
     pub nugs: ServiceSection,
 
@@ -64,6 +67,7 @@ impl Default for Config {
             format: "flac".to_string(),
             output_dir: "~/Music/Nugs".to_string(),
             postprocess_codec: "none".to_string(),
+            flac_convert: "none".to_string(),
             nugs: ServiceSection::default(),
             livephish: ServiceSection::default(),
         }
@@ -75,6 +79,9 @@ impl Config {
     fn normalize(&mut self) {
         if !["none", "flac", "alac"].contains(&self.postprocess_codec.as_str()) {
             self.postprocess_codec = "none".to_string();
+        }
+        if !["none", "alac", "aac"].contains(&self.flac_convert.as_str()) {
+            self.flac_convert = "none".to_string();
         }
     }
 
@@ -173,6 +180,7 @@ mod tests {
         assert_eq!(cfg.format, "flac");
         assert_eq!(cfg.output_dir, "~/Music/Nugs");
         assert_eq!(cfg.postprocess_codec, "none");
+        assert_eq!(cfg.flac_convert, "none");
         assert_eq!(cfg.nugs.email, "");
         assert_eq!(cfg.livephish.email, "");
     }
@@ -188,6 +196,7 @@ mod tests {
             format: "alac".to_string(),
             output_dir: "~/Downloads/Music".to_string(),
             postprocess_codec: "none".to_string(),
+            flac_convert: "none".to_string(),
             nugs: ServiceSection {
                 email: "test@example.com".to_string(),
             },
@@ -361,5 +370,43 @@ postprocess_codec = "invalid_codec"
 
         let cfg = load_config_from(&config_dir, &cache_dir);
         assert_eq!(cfg.postprocess_codec, "none");
+    }
+
+    #[test]
+    fn test_invalid_flac_convert_normalized() {
+        let tmp = tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let cache_dir = tmp.path().join("cache");
+
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            r#"
+format = "flac"
+output_dir = "~/Music/Nugs"
+flac_convert = "mp3"
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_config_from(&config_dir, &cache_dir);
+        assert_eq!(cfg.flac_convert, "none");
+    }
+
+    #[test]
+    fn test_flac_convert_valid_values_persist() {
+        let tmp = tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let cache_dir = tmp.path().join("cache");
+
+        for val in ["none", "alac", "aac"] {
+            let cfg = Config {
+                flac_convert: val.to_string(),
+                ..Config::default()
+            };
+            save_config_to(&cfg, &config_dir);
+            let loaded = load_config_from(&config_dir, &cache_dir);
+            assert_eq!(loaded.flac_convert, val);
+        }
     }
 }

@@ -67,30 +67,42 @@ pub fn detect_codec(path: &Path) -> Option<String> {
     }
 }
 
-/// Check if an .m4a file was already converted to ALAC.
+/// Check if an .m4a file was already converted to the target codec.
 ///
-/// Only meaningful for ALAC (AAC and ALAC share the .m4a extension).
+/// Meaningful for codecs that share the .m4a extension (AAC and ALAC).
 /// Falls back to true (assume done) if ffprobe is unavailable.
 pub fn is_already_converted(path: &Path, target_codec: &str) -> bool {
-    if target_codec != "alac" || !path.exists() {
+    if !matches!(target_codec, "alac" | "aac") || !path.exists() {
         return false;
     }
     match detect_codec(path) {
-        Some(codec) => codec == "alac",
+        Some(codec) => codec == target_codec,
         None => true, // Can't detect — assume done
+    }
+}
+
+/// Resolve the effective FLAC conversion target.
+///
+/// Priority: explicit `flac_convert` setting, then implicit ALAC when
+/// the user requested ALAC but the API serves FLAC, otherwise no conversion.
+pub fn effective_flac_target<'a>(flac_convert: &'a str, requested_format: &str) -> &'a str {
+    match flac_convert {
+        "none" if requested_format == "alac" => "alac",
+        "none" => "none",
+        other => other,
     }
 }
 
 /// Compute the file path after optional postprocessing.
 ///
-/// Handles two conversion paths:
-/// - AAC postprocess: .m4a→.flac (FLAC) or .m4a→.m4a (ALAC, same ext different codec)
-/// - FLAC→ALAC: .flac→.m4a (when user requests ALAC but API serves FLAC)
+/// - AAC→FLAC postprocess: .m4a becomes .flac
+/// - AAC→ALAC postprocess: .m4a stays .m4a (same extension, different codec)
+/// - FLAC→ALAC or FLAC→AAC: .flac becomes .m4a
 pub fn compute_final_path(
     download_path: &Path,
     quality_code: &str,
     postprocess_codec: &str,
-    flac_to_alac: bool,
+    flac_target: &str,
 ) -> PathBuf {
     if quality_code == "aac" && postprocess_codec != "none" {
         if postprocess_codec == "flac" {
@@ -98,7 +110,7 @@ pub fn compute_final_path(
         }
         return download_path.to_path_buf(); // ALAC keeps .m4a
     }
-    if flac_to_alac && quality_code == "flac" {
+    if quality_code == "flac" && matches!(flac_target, "alac" | "aac") {
         return download_path.with_extension("m4a");
     }
     download_path.to_path_buf()
@@ -120,9 +132,9 @@ pub fn postprocess_aac(source: &Path, target_codec: &str) -> (PathBuf, Option<St
     match target_codec {
         "flac" => {
             let dest = source.with_extension("flac");
-            transcode(source, &dest, "flac", ".flac.part")
+            transcode(source, &dest, "flac", ".flac.part", None)
         }
-        "alac" => transcode(source, source, "alac", ".m4a.converting"),
+        "alac" => transcode(source, source, "alac", ".m4a.converting", None),
         _ => (source.to_path_buf(), None),
     }
 }
@@ -133,14 +145,23 @@ pub fn postprocess_aac(source: &Path, target_codec: &str) -> (PathBuf, Option<St
 /// Returns `(final_path, error)` — error is None on success.
 pub fn postprocess_flac_to_alac(source: &Path) -> (PathBuf, Option<String>) {
     let dest = source.with_extension("m4a");
-    transcode(source, &dest, "alac", ".m4a.converting")
+    transcode(source, &dest, "alac", ".m4a.converting", None)
+}
+
+/// Convert a FLAC file to AAC 256 kbps (.m4a).
+///
+/// Lossy conversion for smaller file sizes. Source .flac is deleted on success.
+/// Returns `(final_path, error)` — error is None on success.
+pub fn postprocess_flac_to_aac(source: &Path) -> (PathBuf, Option<String>) {
+    let dest = source.with_extension("m4a");
+    transcode(source, &dest, "aac", ".m4a.converting", Some("256k"))
 }
 
 /// Container format flag for ffmpeg's -f option.
 fn container_format(codec: &str) -> Option<&'static str> {
     match codec {
         "flac" => Some("flac"),
-        "alac" => Some("ipod"),
+        "alac" | "aac" => Some("ipod"),
         _ => None,
     }
 }
@@ -171,6 +192,7 @@ fn transcode(
     dest: &Path,
     codec: &str,
     temp_suffix: &str,
+    bitrate: Option<&str>,
 ) -> (PathBuf, Option<String>) {
     let temp = source.with_extension(temp_suffix.strip_prefix('.').unwrap_or(temp_suffix));
     safe_unlink(&temp);
@@ -183,7 +205,13 @@ fn transcode(
     let mut cmd = Command::new(&ffmpeg_bin);
     cmd.args(["-y", "-i"])
         .arg(source)
-        .args(["-c:a", codec, "-c:v", "copy", "-map_metadata", "0"]);
+        .args(["-c:a", codec]);
+
+    if let Some(br) = bitrate {
+        cmd.args(["-b:a", br]);
+    }
+
+    cmd.args(["-c:v", "copy", "-map_metadata", "0"]);
 
     if let Some(fmt) = container_format(codec) {
         cmd.args(["-f", fmt]);

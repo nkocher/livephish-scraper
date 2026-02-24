@@ -57,6 +57,10 @@ enum Commands {
         /// Output directory
         #[arg(short, long)]
         output: Option<String>,
+
+        /// FLAC conversion: none, alac, aac (overrides config)
+        #[arg(long)]
+        flac_convert: Option<String>,
     },
     /// Download all shows for an artist
     DownloadAll {
@@ -70,6 +74,10 @@ enum Commands {
         /// Output directory
         #[arg(short, long)]
         output: Option<String>,
+
+        /// FLAC conversion: none, alac, aac (overrides config)
+        #[arg(long)]
+        flac_convert: Option<String>,
     },
 }
 
@@ -95,15 +103,17 @@ async fn main() -> Result<()> {
             container_id,
             format,
             output,
+            flac_convert,
         }) => {
-            run_download(container_id, &format, output.as_deref(), cli.force_login).await?;
+            run_download(container_id, &format, output.as_deref(), flac_convert.as_deref(), cli.force_login).await?;
         }
         Some(Commands::DownloadAll {
             artist,
             format,
             output,
+            flac_convert,
         }) => {
-            run_download_all(&artist, &format, output.as_deref(), cli.force_login).await?;
+            run_download_all(&artist, &format, output.as_deref(), flac_convert.as_deref(), cli.force_login).await?;
         }
         None => {
             run_interactive_browser(cli.force_login).await?;
@@ -315,6 +325,7 @@ async fn run_download(
     container_id: i64,
     format_name: &str,
     output_override: Option<&str>,
+    flac_convert_override: Option<&str>,
     force_login: bool,
 ) -> Result<()> {
     let cfg = load_config();
@@ -371,11 +382,17 @@ async fn run_download(
     );
 
     // Download all tracks (CLI download is always nugs.net)
+    let flac_convert = match flac_convert_override {
+        Some(v) if ["none", "alac", "aac"].contains(&v) => v,
+        Some(v) => bail!("Invalid --flac-convert value: {v} (must be none, alac, or aac)"),
+        None => &cfg.flac_convert,
+    };
     let outcome = download_show(
         &show,
         &tracks_with_urls,
         &output_dir,
         &cfg.postprocess_codec,
+        flac_convert,
         Service::Nugs,
         format_code,
     )
@@ -395,6 +412,7 @@ async fn run_download_all(
     artist_input: &str,
     format_name: &str,
     output_override: Option<&str>,
+    flac_convert_override: Option<&str>,
     force_login: bool,
 ) -> Result<()> {
     use crate::catalog::ArtistTarget;
@@ -489,11 +507,17 @@ async fn run_download_all(
             continue;
         }
 
+        let flac_convert = match flac_convert_override {
+            Some(v) if ["none", "alac", "aac"].contains(&v) => v,
+            Some(v) => bail!("Invalid --flac-convert value: {v} (must be none, alac, or aac)"),
+            None => &cfg.flac_convert,
+        };
         let outcome = download_show_with_retry(
             &show,
             &tracks_with_urls,
             &output_dir,
             &cfg.postprocess_codec,
+            flac_convert,
             catalog_show.service,
             format_code,
             std::time::Duration::from_secs(30),

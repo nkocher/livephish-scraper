@@ -15,8 +15,8 @@ use crate::models::sanitize::sanitize_filename;
 use crate::models::{FormatCode, Quality, Show, Track};
 use crate::service::Service;
 use crate::transcode::{
-    check_ffmpeg, compute_final_path, is_already_converted, postprocess_aac,
-    postprocess_flac_to_alac,
+    check_ffmpeg, compute_final_path, effective_flac_target, is_already_converted, postprocess_aac,
+    postprocess_flac_to_aac, postprocess_flac_to_alac,
 };
 
 use self::escape::{disable_cbreak, enable_cbreak, new_cancel_flag, spawn_escape_watcher};
@@ -47,6 +47,8 @@ enum ConversionMode {
     AacPostprocess,
     /// FLAC→ALAC (when ALAC requested but API serves FLAC).
     FlacToAlac,
+    /// FLAC→AAC 256 kbps (explicit flac_convert="aac" setting).
+    FlacToAac,
 }
 
 impl ConversionMode {
@@ -56,6 +58,7 @@ impl ConversionMode {
         match self {
             Self::AacPostprocess => postprocess_aac(source, codec),
             Self::FlacToAlac => postprocess_flac_to_alac(source),
+            Self::FlacToAac => postprocess_flac_to_aac(source),
             Self::None => (source.to_path_buf(), None),
         }
     }
@@ -86,6 +89,7 @@ fn should_skip_track(
             is_already_converted(final_dest, "alac")
         }
         ConversionMode::FlacToAlac => is_already_converted(final_dest, "alac"),
+        ConversionMode::FlacToAac => is_already_converted(final_dest, "aac"),
         _ => true,
     }
 }
@@ -261,6 +265,7 @@ pub async fn download_show(
     tracks_with_urls: &TracksWithUrls,
     output_dir: &Path,
     postprocess_codec: &str,
+    flac_convert: &str,
     service: Service,
     requested_format: FormatCode,
 ) -> DownloadOutcome {
@@ -279,8 +284,8 @@ pub async fn download_show(
         postprocess_codec
     };
 
-    let flac_to_alac = requested_format == FormatCode::Alac;
-    let mut warned_no_ffmpeg_alac = false;
+    let flac_target = effective_flac_target(flac_convert, requested_format.name());
+    let mut warned_no_ffmpeg_flac = false;
 
     // ── Phase 1: Pre-filter (skip/resume) ───────────────────────────
     let mut to_download: Vec<(Track, String, Quality, PathBuf, ConversionMode)> = Vec::new();
@@ -298,21 +303,32 @@ pub async fn download_show(
 
         let conversion = if effective_codec != "none" && quality.code == "aac" {
             ConversionMode::AacPostprocess
-        } else if flac_to_alac && quality.code == "flac" && has_ffmpeg {
-            ConversionMode::FlacToAlac
-        } else if flac_to_alac && quality.code == "flac" && !has_ffmpeg && !warned_no_ffmpeg_alac {
-            warn!("ffmpeg not found — FLAC tracks will not be converted to ALAC");
-            warned_no_ffmpeg_alac = true;
-            ConversionMode::None
+        } else if quality.code == "flac" && flac_target != "none" {
+            if !has_ffmpeg {
+                if !warned_no_ffmpeg_flac {
+                    warn!("ffmpeg not found — FLAC tracks will not be converted");
+                    warned_no_ffmpeg_flac = true;
+                }
+                ConversionMode::None
+            } else {
+                match flac_target {
+                    "aac" => ConversionMode::FlacToAac,
+                    _ => ConversionMode::FlacToAlac,
+                }
+            }
         } else {
             ConversionMode::None
         };
 
+        let effective_flac_target = match conversion {
+            ConversionMode::FlacToAlac | ConversionMode::FlacToAac => flac_target,
+            _ => "none",
+        };
         let final_dest = compute_final_path(
             &download_dest,
             quality.code,
             effective_codec,
-            conversion == ConversionMode::FlacToAlac,
+            effective_flac_target,
         );
 
         // Already fully processed
@@ -543,11 +559,13 @@ pub async fn download_show(
 /// Calls `download_show` up to 3 times total. Between passes, tracks that
 /// succeeded on earlier passes are automatically skipped by `should_skip_track`.
 /// Aborts early if no progress is made (same failure count as previous pass).
+#[allow(clippy::too_many_arguments)]
 pub async fn download_show_with_retry(
     show: &Show,
     tracks_with_urls: &TracksWithUrls,
     output_dir: &Path,
     postprocess_codec: &str,
+    flac_convert: &str,
     service: Service,
     requested_format: FormatCode,
     pass_cooldown: Duration,
@@ -562,6 +580,7 @@ pub async fn download_show_with_retry(
             tracks_with_urls,
             output_dir,
             postprocess_codec,
+            flac_convert,
             service,
             requested_format,
         )
