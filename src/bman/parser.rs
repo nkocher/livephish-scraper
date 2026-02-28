@@ -85,7 +85,7 @@ static ETREE_ARTIST_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(gd|jgb|jg)").unwrap());
 
 static SOURCE_TYPE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(sbeok|sbd|betty\s*board|audience|aud|matrix|mtx)\b").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)\b(sbeok|sbd|betty\s*board|audience|aud|fob|matrix|mtx)\b").unwrap());
 
 // Track number, optional separator (dot/dash), then title, then .flac extension.
 // Use [-.]  so '-' is literal (at start of class).
@@ -162,7 +162,7 @@ fn detect_source_type(text: &str) -> SourceType {
     let matched = cap[1].to_lowercase();
     if matched.starts_with("sbeok") || matched.starts_with("sbd") || matched.contains("betty") {
         SourceType::Sbd
-    } else if matched.starts_with("aud") {
+    } else if matched.starts_with("aud") || matched == "fob" {
         SourceType::Aud
     } else {
         // mtx / matrix
@@ -1176,6 +1176,8 @@ mod tests {
         assert_eq!(detect_source_type("mtx.smith"), SourceType::Mtx);
         assert_eq!(detect_source_type("matrix mix"), SourceType::Mtx);
         assert_eq!(detect_source_type("flac16"), SourceType::Unknown);
+        assert_eq!(detect_source_type("fob.ecm.99a.hopkins"), SourceType::Aud);
+        assert_eq!(detect_source_type("fob.akg.d330bt.senn421.hecht"), SourceType::Aud);
     }
 
     #[test]
@@ -1899,6 +1901,33 @@ mod tests {
         let result = dedup_shows(vec![nll_aud, non_nll_sbd]);
         assert_eq!(result.len(), 1, "Non-NLL SBD should survive when NLL is AUD");
         assert_eq!(result[0].source_type, SourceType::Sbd);
+        assert!(!result[0].is_nll);
+    }
+
+    #[test]
+    fn test_nll_fob_loses_to_aaa_sbd() {
+        // Real scenario: NLL has FOB recording, AAA year folder has SBD
+        // FOB is classified as AUD → dropped first → SBD survives
+        let nll_fob = parse_show_folder(
+            "gd1983-05-13.fob.akg.d330bt.senn421.hecht.miller.clugston.147896.flac1648",
+            "nll_fid",
+            BmanArtist::GratefulDead,
+            true, // NLL
+        ).unwrap();
+        assert_eq!(nll_fob.source_type, SourceType::Aud, "FOB should be classified as AUD");
+        assert!(nll_fob.is_nll);
+
+        let aaa_sbd = parse_show_folder(
+            "gd83-05-13.sbd.miller.sbeok.flac16",
+            "aaa_fid",
+            BmanArtist::GratefulDead,
+            false, // regular AAA folder
+        ).unwrap();
+        assert_eq!(aaa_sbd.source_type, SourceType::Sbd);
+
+        let result = dedup_shows(vec![nll_fob, aaa_sbd]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].source_type, SourceType::Sbd, "AAA SBD must beat NLL FOB");
         assert!(!result[0].is_nll);
     }
 
