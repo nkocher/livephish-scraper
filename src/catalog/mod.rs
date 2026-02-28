@@ -268,6 +268,17 @@ impl Catalog {
     ) -> Result<Vec<CatalogShow>, ApiError> {
         // Route Bman artists (GD/JGB) to Google Drive — no fallback to nugs
         if is_bman_artist(artist_id) {
+            // Both GD (461) and JGB (-1) are fetched together by fetch_bman_enriched.
+            // If we already attempted one, skip the redundant second scan.
+            if self.attempted_artists.contains(&crate::bman::parser::BMAN_GD_ARTIST_ID)
+                || self.attempted_artists.contains(&crate::bman::parser::BMAN_JGB_ARTIST_ID)
+            {
+                let artist_shows: Vec<CatalogShow> = self.shows.iter()
+                    .filter(|s| s.artist_id == artist_id && s.service == Service::Bman)
+                    .cloned()
+                    .collect();
+                return Ok(artist_shows);
+            }
             if let Some(bman) = router.bman.as_mut() {
                 // fetch_bman handles retain+extend+build_indexes internally
                 let sfm_key = self.setlistfm_api_key.clone();
