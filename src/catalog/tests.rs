@@ -25,6 +25,7 @@ fn test_router(api: NugsApi) -> ServiceRouter {
     ServiceRouter {
         nugs: api,
         livephish: None,
+        bman: None,
     }
 }
 

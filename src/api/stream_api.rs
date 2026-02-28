@@ -162,6 +162,7 @@ impl NugsApi {
                 self.get_stream_url_livephish(track_id, format_code, stream_params)
                     .await
             }
+            Service::Bman => unreachable!("Bman uses direct Google Drive URLs, not stream API"),
         }
     }
 

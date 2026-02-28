@@ -22,6 +22,15 @@ pub struct ServiceSection {
     pub email: String,
 }
 
+/// Bman (Google Drive) configuration — API keys, not email/password.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BmanSection {
+    #[serde(default)]
+    pub google_api_key: String,
+    #[serde(default)]
+    pub setlistfm_api_key: String,
+}
+
 /// User configuration (persisted as TOML).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -46,6 +55,9 @@ pub struct Config {
 
     #[serde(default)]
     pub livephish: ServiceSection,
+
+    #[serde(default)]
+    pub bman: BmanSection,
 }
 
 fn default_format() -> String {
@@ -70,26 +82,40 @@ impl Default for Config {
             flac_convert: "none".to_string(),
             nugs: ServiceSection::default(),
             livephish: ServiceSection::default(),
+            bman: BmanSection::default(),
         }
     }
 }
 
 impl Config {
     /// Validate and normalize config fields.
-    fn normalize(&mut self) {
+    pub fn normalize(&mut self) {
         if !["none", "flac", "alac"].contains(&self.postprocess_codec.as_str()) {
             self.postprocess_codec = "none".to_string();
         }
         if !["none", "alac", "aac"].contains(&self.flac_convert.as_str()) {
             self.flac_convert = "none".to_string();
         }
+        // Env var overrides for Bman API keys
+        if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+            if !key.is_empty() {
+                self.bman.google_api_key = key;
+            }
+        }
+        if let Ok(key) = std::env::var("SETLIST_FM_API_KEY") {
+            if !key.is_empty() {
+                self.bman.setlistfm_api_key = key;
+            }
+        }
     }
 
     /// Return the configured email for the given service.
+    /// Bman doesn't use email auth — returns empty string.
     pub fn email_for(&self, service: Service) -> &str {
         match service {
             Service::Nugs => &self.nugs.email,
             Service::LivePhish => &self.livephish.email,
+            Service::Bman => "",
         }
     }
 }
@@ -119,7 +145,8 @@ pub fn load_config() -> Config {
         }
     }
 
-    let config = Config::default();
+    let mut config = Config::default();
+    config.normalize();
     save_config(&config);
     config
 }
@@ -147,7 +174,8 @@ pub fn load_config_from(config_dir: &PathBuf, cache_dir: &PathBuf) -> Config {
         }
     }
 
-    let config = Config::default();
+    let mut config = Config::default();
+    config.normalize();
     save_config_to(&config, config_dir);
     config
 }
@@ -203,6 +231,7 @@ mod tests {
             livephish: ServiceSection {
                 email: "lp@example.com".to_string(),
             },
+            bman: BmanSection::default(),
         };
 
         save_config_to(&test_config, &config_dir);

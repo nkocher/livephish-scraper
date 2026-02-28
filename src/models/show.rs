@@ -234,7 +234,7 @@ impl DisplayLocation for Show {
 }
 
 /// Lightweight show entry from containersAll (no tracks).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CatalogShow {
     #[serde(rename = "containerID", default)]
     pub container_id: i64,

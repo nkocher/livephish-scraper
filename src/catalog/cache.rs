@@ -9,13 +9,19 @@ use crate::service::Service;
 use super::is_valid_live_show;
 
 pub const CACHE_TTL_DAYS: u64 = 7;
+pub const BMAN_CACHE_TTL_DAYS: u64 = 30;
 
 /// Read and parse a cache file, returning None if missing, expired, or corrupt.
 fn read_cache_file(path: &Path) -> Option<Vec<serde_json::Value>> {
+    read_cache_file_with_ttl(path, CACHE_TTL_DAYS)
+}
+
+/// Read and parse a cache file with custom TTL.
+fn read_cache_file_with_ttl(path: &Path, ttl_days: u64) -> Option<Vec<serde_json::Value>> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     let age = SystemTime::now().duration_since(modified).ok()?;
-    if age.as_secs() > CACHE_TTL_DAYS * 86400 {
+    if age.as_secs() > ttl_days * 86400 {
         return None;
     }
     let content = fs::read_to_string(path).ok()?;
@@ -138,5 +144,68 @@ pub fn save_catalog_meta(
     let meta_file = cache_dir.join("catalog_meta.json");
     if let Ok(content) = serde_json::to_string_pretty(meta) {
         let _ = fs::write(meta_file, content);
+    }
+}
+
+// ── Bman cache ────────────────────────────────────────────────────────
+
+/// Atomic write: write to `.tmp` then rename, preventing partial reads.
+fn atomic_write(cache_dir: &Path, filename: &str, content: &str) {
+    let _ = fs::create_dir_all(cache_dir);
+    let tmp_file = cache_dir.join(format!("{filename}.tmp"));
+    let final_file = cache_dir.join(filename);
+    if fs::write(&tmp_file, content).is_ok() {
+        let _ = fs::rename(tmp_file, final_file);
+    }
+}
+
+/// Load cached Bman shows. Returns None if cache missing/expired.
+/// All returned shows are tagged with `Service::Bman`.
+/// If deserialization fails, deletes the corrupt cache and returns None.
+pub fn load_bman_cache(cache_dir: &Path) -> Option<Vec<CatalogShow>> {
+    let cache_file = cache_dir.join("catalog_bman.json");
+    if let Some(data) = read_cache_file_with_ttl(&cache_file, BMAN_CACHE_TTL_DAYS) {
+        let shows: Vec<CatalogShow> = data
+            .iter()
+            .map(|v| {
+                let mut show = CatalogShow::from_json(v);
+                show.service = Service::Bman;
+                show
+            })
+            .collect();
+        return Some(shows);
+    }
+
+    // Check if file exists but failed to parse (corrupt)
+    if cache_file.exists() {
+        if let Ok(content) = fs::read_to_string(&cache_file) {
+            if serde_json::from_str::<Vec<serde_json::Value>>(&content).is_err() {
+                tracing::warn!("Corrupt Bman cache — deleting and re-traversing");
+                let _ = fs::remove_file(&cache_file);
+            }
+        }
+    }
+    None
+}
+
+/// Save Bman shows to cache file with atomic write (.tmp → rename).
+pub fn save_bman_cache(cache_dir: &Path, shows: &[CatalogShow]) {
+    let data = serialize_shows(shows);
+    if let Ok(content) = serde_json::to_string_pretty(&data) {
+        atomic_write(cache_dir, "catalog_bman.json", &content);
+    }
+}
+
+/// Load Bman ID map from cache.
+pub fn load_bman_id_map(cache_dir: &Path) -> Option<crate::bman::id_map::BmanIdMap> {
+    let path = cache_dir.join("bman_id_map.json");
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Save Bman ID map to cache with atomic write.
+pub fn save_bman_id_map(cache_dir: &Path, id_map: &crate::bman::id_map::BmanIdMap) {
+    if let Ok(content) = serde_json::to_string_pretty(id_map) {
+        atomic_write(cache_dir, "bman_id_map.json", &content);
     }
 }

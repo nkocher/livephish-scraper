@@ -16,8 +16,9 @@ use crate::service::router::ServiceRouter;
 use crate::service::Service;
 
 use cache::{
-    artist_id_from_cache_file, cache_show_count, load_artist_cache, load_catalog_meta,
-    load_livephish_cache, save_artist_cache, save_catalog_meta, save_livephish_cache,
+    artist_id_from_cache_file, cache_show_count, load_artist_cache, load_bman_cache,
+    load_catalog_meta, load_livephish_cache, save_artist_cache, save_bman_cache,
+    save_bman_id_map, save_catalog_meta, save_livephish_cache,
 };
 use registry::{
     find_artist_ids, load_artist_registry, normalize_artist_name, registry_groups,
@@ -27,6 +28,51 @@ use search::{build_corpus_entry, search_artist_shows, search_shows};
 
 /// Discovery staleness threshold (days).
 const DISCOVERY_STALENESS_DAYS: u64 = 30;
+
+/// Artist IDs served by Bman (Google Drive archive).
+pub fn is_bman_artist(artist_id: i64) -> bool {
+    artist_id == crate::bman::parser::BMAN_GD_ARTIST_ID
+        || artist_id == crate::bman::parser::BMAN_JGB_ARTIST_ID
+}
+
+/// Accumulates parsed Bman shows and folder scan counters.
+struct BmanScanResult {
+    parsed: Vec<crate::bman::parser::ParsedShow>,
+    total_folders: usize,
+    failed_folders: usize,
+}
+
+impl BmanScanResult {
+    fn new() -> Self {
+        Self {
+            parsed: Vec::new(),
+            total_folders: 0,
+            failed_folders: 0,
+        }
+    }
+
+    /// Try to parse a single Drive item as a Bman show folder.
+    fn parse_item(
+        &mut self,
+        item: &crate::bman::gdrive::DriveItem,
+        artist: crate::bman::parser::BmanArtist,
+        is_nll: bool,
+    ) {
+        // Skip known non-show folders silently
+        if crate::bman::parser::should_skip_folder(&item.name) {
+            return;
+        }
+
+        self.total_folders += 1;
+        match crate::bman::parser::parse_show_folder(&item.name, &item.id, artist, is_nll) {
+            Some(parsed) => self.parsed.push(parsed),
+            None => {
+                self.failed_folders += 1;
+                warn!("Unparseable show folder: {}", item.name);
+            }
+        }
+    }
+}
 
 // ── Placeholder / validation helpers ────────────────────────────────────
 
@@ -45,7 +91,14 @@ pub fn is_placeholder(value: &str) -> bool {
 ///
 /// Non-show entries (albums, compilations) typically lack performance dates
 /// and venue metadata. Placeholder values like "None", "unknown" are treated as missing.
+///
+/// Bman shows use negative synthetic IDs and may lack venue metadata (etree folders),
+/// so the rules are relaxed: only a meaningful date is required.
 pub fn is_valid_live_show(show: &CatalogShow) -> bool {
+    if show.service == Service::Bman {
+        // Bman shows have negative synthetic IDs — only require a date
+        return !is_placeholder(&show.performance_date);
+    }
     if show.container_id <= 0 {
         return false;
     }
@@ -91,6 +144,9 @@ pub struct Catalog {
     attempted_artists: HashSet<i64>,
     /// Normalized name -> preferred artist_id (for dedup).
     preferred_artist_ids: HashMap<String, i64>,
+
+    /// setlist.fm API key for catalog-time venue enrichment.
+    setlistfm_api_key: String,
 }
 
 impl Catalog {
@@ -105,7 +161,13 @@ impl Catalog {
             loaded_artists: HashSet::new(),
             attempted_artists: HashSet::new(),
             preferred_artist_ids: HashMap::new(),
+            setlistfm_api_key: String::new(),
         }
+    }
+
+    /// Set the setlist.fm API key for catalog-time venue enrichment.
+    pub fn set_setlistfm_api_key(&mut self, key: &str) {
+        self.setlistfm_api_key = key.to_string();
     }
 
     // ── Load (sync — disk only) ─────────────────────────────────────
@@ -119,6 +181,18 @@ impl Catalog {
         self.artist_registry = load_artist_registry(&self.cache_dir);
         self.run_registry_migration_if_needed();
 
+        // Load Bman cache (GD/JGB shows from Google Drive archive)
+        let bman_loaded = load_bman_cache(&self.cache_dir)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                for show in &s {
+                    self.attempted_artists.insert(show.artist_id);
+                    self.loaded_artists.insert(show.artist_id);
+                }
+                self.shows.extend(s);
+            })
+            .is_some();
+
         // Determine which Phish artist IDs should be skipped (served from LivePhish cache)
         let livephish_loaded = has_livephish
             && load_livephish_cache(&self.cache_dir)
@@ -130,6 +204,11 @@ impl Catalog {
         let artist_ids: Vec<i64> = self.artist_registry.keys().copied().collect();
 
         for artist_id in artist_ids {
+            // Skip nugs cache for Bman artists if Bman cache was loaded
+            if bman_loaded && is_bman_artist(artist_id) {
+                continue;
+            }
+
             // Skip nugs Phish cache if LivePhish cache was loaded
             if livephish_loaded && self.is_phish_artist(artist_id) {
                 self.attempted_artists.insert(artist_id);
@@ -169,6 +248,32 @@ impl Catalog {
         router: &mut ServiceRouter,
         artist_id: i64,
     ) -> Result<Vec<CatalogShow>, ApiError> {
+        // Route Bman artists (GD/JGB) to Google Drive — no fallback to nugs
+        if is_bman_artist(artist_id) {
+            if let Some(bman) = router.bman.as_mut() {
+                // fetch_bman handles retain+extend+build_indexes internally
+                let sfm_key = self.setlistfm_api_key.clone();
+                let shows = self.fetch_bman_enriched(bman, &sfm_key).await?;
+
+                let bman_ids = [
+                    crate::bman::parser::BMAN_GD_ARTIST_ID,
+                    crate::bman::parser::BMAN_JGB_ARTIST_ID,
+                ];
+                for aid in bman_ids {
+                    self.attempted_artists.insert(aid);
+                    if shows.iter().any(|s| s.artist_id == aid) {
+                        self.loaded_artists.insert(aid);
+                    }
+                }
+
+                // Return just the requested artist's shows
+                let artist_shows: Vec<CatalogShow> =
+                    shows.into_iter().filter(|s| s.artist_id == artist_id).collect();
+                return Ok(artist_shows);
+            }
+            // No Bman API available — fall through (will try nugs for GD 461)
+        }
+
         // Try LivePhish for Phish artists when available
         if self.is_phish_artist(artist_id) && router.has_livephish() {
             match self
@@ -400,6 +505,210 @@ impl Catalog {
         self.rebuild_preferred_artist_ids();
 
         Ok((new_count, true))
+    }
+
+    // ── Bman helpers ───────────────────────────────────────────────────
+
+    /// Traverse Bman's Google Drive archive and build catalog entries.
+    ///
+    /// Walks root -> year/NLL/JGB -> show folders, parses metadata,
+    /// deduplicates, caches, and converts to CatalogShow.
+    /// Saves partial results on mid-traversal errors.
+    /// When `setlistfm_api_key` is non-empty, enriches shows missing venue data.
+    pub async fn fetch_bman_enriched(
+        &mut self,
+        bman: &mut crate::bman::BmanApi,
+        setlistfm_api_key: &str,
+    ) -> Result<Vec<CatalogShow>, ApiError> {
+        use crate::bman::gdrive::FOLDER_MIME;
+        use crate::bman::parser::{
+            dedup_shows, is_jgb_folder, is_nll_folder, is_year_folder, BmanArtist,
+            BMAN_GD_ARTIST_ID, BMAN_JGB_ARTIST_ID,
+        };
+
+        // Load persisted ID map if available
+        if let Some(id_map) = cache::load_bman_id_map(&self.cache_dir) {
+            bman.id_map = id_map;
+        }
+
+        let mut result = BmanScanResult::new();
+
+        // List root folder
+        let root_items = bman
+            .list_folder_filtered(&bman.root_folder_id.clone(), FOLDER_MIME)
+            .await
+            .map_err(|e| ApiError::UnexpectedResponse(e.to_string()))?;
+
+        for item in &root_items {
+            if let Some(year) = is_year_folder(&item.name) {
+                tracing::info!("Scanning year {}...", year);
+                self.scan_bman_folder(bman, &item.id, BmanArtist::GratefulDead, false, &mut result)
+                    .await;
+            } else if is_nll_folder(&item.name) {
+                tracing::info!("Scanning NLL folder...");
+                self.scan_bman_subfolder_tree(bman, &item.id, BmanArtist::GratefulDead, true, &mut result)
+                    .await;
+            } else if is_jgb_folder(&item.name) {
+                tracing::info!("Scanning JGB folder...");
+                self.scan_bman_subfolder_tree(bman, &item.id, BmanArtist::JerryGarciaBand, false, &mut result)
+                    .await;
+            }
+        }
+
+        tracing::info!(
+            "Parsed {} of {} folders ({} failed)",
+            result.parsed.len(),
+            result.total_folders,
+            result.failed_folders
+        );
+
+        let mut deduped = dedup_shows(result.parsed);
+        tracing::info!("{} shows after deduplication", deduped.len());
+
+        // Enrich shows missing venue data via setlist.fm
+        if !setlistfm_api_key.is_empty() {
+            let needs_venue: usize = deduped.iter().filter(|s| s.venue.is_empty()).count();
+            if needs_venue > 0 {
+                tracing::info!(
+                    "Enriching {}/{} shows via setlist.fm...",
+                    needs_venue,
+                    deduped.len()
+                );
+                let client = reqwest::Client::new();
+                let mut enriched = 0usize;
+                let mut errors = 0usize;
+                for show in &mut deduped {
+                    if !show.venue.is_empty() {
+                        continue;
+                    }
+                    let artist_name = show.artist.name();
+                    match crate::bman::setlistfm::fetch_setlist_venue(
+                        &client,
+                        setlistfm_api_key,
+                        artist_name,
+                        &show.date,
+                    )
+                    .await
+                    {
+                        Ok(Some(sv)) => {
+                            show.venue = sv.venue_name;
+                            show.city = sv.city;
+                            show.state = sv.state;
+                            enriched += 1;
+                        }
+                        Ok(None) => {} // no setlist.fm data for this date
+                        Err(e) => {
+                            tracing::debug!("setlist.fm enrichment error for {}: {}", show.date, e);
+                            errors += 1;
+                            // Abort enrichment on repeated errors (API key invalid, etc.)
+                            if errors >= 5 {
+                                tracing::warn!(
+                                    "Too many setlist.fm errors ({}), stopping enrichment",
+                                    errors
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    // Rate limit: 150ms between requests (~6.7 req/sec)
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+                tracing::info!(
+                    "setlist.fm enriched {}/{} shows ({} errors)",
+                    enriched,
+                    needs_venue,
+                    errors
+                );
+            }
+        }
+
+        // Register artists
+        self.register_artist(BMAN_GD_ARTIST_ID, "Grateful Dead");
+        self.register_artist(BMAN_JGB_ARTIST_ID, "Jerry Garcia Band");
+
+        // Convert to CatalogShow with synthetic IDs
+        let shows: Vec<CatalogShow> = deduped
+            .iter()
+            .map(|parsed| {
+                let container_id = bman.id_map.insert(&parsed.folder_id);
+                CatalogShow {
+                    container_id,
+                    artist_id: parsed.artist.artist_id(),
+                    artist_name: parsed.artist.name().to_string(),
+                    container_info: if parsed.source_tag.is_empty() {
+                        String::new()
+                    } else {
+                        format!("({})", parsed.source_tag)
+                    },
+                    venue_name: parsed.venue.clone(),
+                    venue_city: parsed.city.clone(),
+                    venue_state: parsed.state.clone(),
+                    performance_date: parsed.date.clone(),
+                    performance_date_year: parsed.date.get(..4).unwrap_or("").to_string(),
+                    service: Service::Bman,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        // Cache results + ID map
+        save_bman_cache(&self.cache_dir, &shows);
+        save_bman_id_map(&self.cache_dir, &bman.id_map);
+
+        // Store in memory so callers don't need to manually extend
+        self.shows.retain(|s| s.service != Service::Bman);
+        self.shows.extend(shows.clone());
+        self.build_indexes();
+
+        Ok(shows)
+    }
+
+    /// List subfolders in a Bman folder and parse each as a show.
+    async fn scan_bman_folder(
+        &self,
+        bman: &crate::bman::BmanApi,
+        folder_id: &str,
+        artist: crate::bman::parser::BmanArtist,
+        is_nll: bool,
+        result: &mut BmanScanResult,
+    ) {
+        use crate::bman::gdrive::FOLDER_MIME;
+
+        match bman.list_folder_filtered(folder_id, FOLDER_MIME).await {
+            Ok(show_items) => {
+                for show_item in &show_items {
+                    result.parse_item(show_item, artist, is_nll);
+                }
+            }
+            Err(e) => warn!("Failed to list Bman folder {}: {}", folder_id, e),
+        }
+    }
+
+    /// List a container folder (NLL or JGB), scanning year subfolders and flat shows.
+    async fn scan_bman_subfolder_tree(
+        &self,
+        bman: &crate::bman::BmanApi,
+        folder_id: &str,
+        artist: crate::bman::parser::BmanArtist,
+        is_nll: bool,
+        result: &mut BmanScanResult,
+    ) {
+        use crate::bman::gdrive::FOLDER_MIME;
+        use crate::bman::parser::is_year_folder;
+
+        match bman.list_folder_filtered(folder_id, FOLDER_MIME).await {
+            Ok(items) => {
+                for item in &items {
+                    if is_year_folder(&item.name).is_some() {
+                        self.scan_bman_folder(bman, &item.id, artist, is_nll, result)
+                            .await;
+                    } else {
+                        result.parse_item(item, artist, is_nll);
+                    }
+                }
+            }
+            Err(e) => warn!("Failed to list Bman subfolder {}: {}", folder_id, e),
+        }
     }
 
     // ── LivePhish helpers ─────────────────────────────────────────────
@@ -710,7 +1019,7 @@ impl Catalog {
 
     // ── Index building (sync) ───────────────────────────────────────
 
-    fn build_indexes(&mut self) {
+    pub(crate) fn build_indexes(&mut self) {
         // Re-filter shows (in case any invalid slipped in)
         self.shows.retain(is_valid_live_show);
 

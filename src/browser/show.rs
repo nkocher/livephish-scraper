@@ -5,6 +5,7 @@ use crate::download::download_show;
 use crate::models::show::DisplayLocation;
 use crate::models::{CatalogShow, FormatCode, Show};
 use crate::service::router::ServiceRouter;
+use crate::service::Service;
 
 use super::prompt::{styled_fuzzy, styled_select, PromptResult};
 use super::queue::download_queued_shows;
@@ -189,15 +190,35 @@ pub(crate) async fn show_detail(
             println!();
             println!("  \x1b[2mFetching show details...\x1b[0m");
 
-            match router
-                .api_for(catalog_show.service)
-                .get_show_detail(catalog_show.container_id)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("  Failed to fetch show: {e}");
-                    return;
+            if catalog_show.service == Service::Bman {
+                match router.bman_api() {
+                    Some(bman) => {
+                        match crate::bman::download::fetch_bman_show_detail(bman, catalog_show)
+                            .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("  Failed to fetch Bman show: {e}");
+                                return;
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!("  Bman API not available");
+                        return;
+                    }
+                }
+            } else {
+                match router
+                    .api_for(catalog_show.service)
+                    .get_show_detail(catalog_show.container_id)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("  Failed to fetch show: {e}");
+                        return;
+                    }
                 }
             }
         }
@@ -272,7 +293,7 @@ pub(crate) async fn show_detail(
 /// Download a single show immediately.
 async fn download_single(
     show: &Show,
-    service: crate::service::Service,
+    service: Service,
     router: &mut ServiceRouter,
     config: &mut Config,
 ) {
@@ -295,18 +316,48 @@ async fn download_single(
         }
     };
 
-    let api = router.api_for(service);
-    let (tracks_with_urls, stats) = resolve_tracks(show, api, format_code).await;
-
-    print_resolution_warnings(&stats, "");
+    let (mut enriched_show, tracks_with_urls, flac_convert) = if service == Service::Bman {
+        match router.bman_api() {
+            Some(bman) => {
+                let twu = crate::bman::download::resolve_bman_tracks(show, bman);
+                let fc = crate::bman::download::bman_flac_convert(&config.flac_convert);
+                (show.clone(), twu, fc.to_string())
+            }
+            None => {
+                eprintln!("Bman API not available");
+                return;
+            }
+        }
+    } else {
+        let api = router.api_for(service);
+        let (twu, stats) = resolve_tracks(show, api, format_code).await;
+        print_resolution_warnings(&stats, "");
+        (show.clone(), twu, config.flac_convert.clone())
+    };
 
     if tracks_with_urls.is_empty() {
         println!("\x1b[38;5;203mNo downloadable tracks found.\x1b[0m");
         return;
     }
 
+    // Bman: enrich metadata before download (setlist.fm titles used for tagging)
+    if service == Service::Bman {
+        crate::bman::download::bman_enrich_metadata(
+            &mut enriched_show,
+            &output_dir,
+            &config.bman.setlistfm_api_key,
+        )
+        .await;
+    }
+
     let outcome =
-        download_show(show, &tracks_with_urls, &output_dir, &codec, &config.flac_convert, service, format_code).await;
+        download_show(&enriched_show, &tracks_with_urls, &output_dir, &codec, &flac_convert, service, format_code).await;
+
+    // Bman: generate + embed cover art after download
+    if service == Service::Bman && outcome.completed {
+        crate::bman::download::bman_save_cover_art(&enriched_show, &output_dir);
+    }
+
     if outcome.completed {
         println!("\x1b[1;38;5;113mDownload complete!\x1b[0m");
     }

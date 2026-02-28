@@ -59,6 +59,10 @@ impl NugsApi {
                 // LivePhish uses secureApi.aspx for these — URLs built at call site
                 (String::new(), String::new())
             }
+            ServiceAuth::Bman => {
+                // Bman doesn't use NugsApi — this path shouldn't be reached in practice
+                (String::new(), String::new())
+            }
         };
 
         NugsApi {

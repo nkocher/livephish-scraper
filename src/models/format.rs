@@ -42,6 +42,8 @@ impl FormatCode {
                 // MQA and 360RA not available on LivePhish — fallback to FLAC
                 Self::Mqa | Self::Ra360 => 4,
             },
+            // Bman only serves FLAC — all codes map to FLAC (2)
+            Service::Bman => 2,
         }
     }
 
@@ -51,6 +53,8 @@ impl FormatCode {
         match service {
             Service::Nugs => true,
             Service::LivePhish => !matches!(self, Self::Mqa | Self::Ra360),
+            // Bman only serves FLAC files from Google Drive
+            Service::Bman => matches!(self, Self::Flac),
         }
     }
 
@@ -253,6 +257,25 @@ mod tests {
         assert!(FormatCode::Aac.available_on(Service::LivePhish));
         assert!(!FormatCode::Mqa.available_on(Service::LivePhish));
         assert!(!FormatCode::Ra360.available_on(Service::LivePhish));
+    }
+
+    #[test]
+    fn test_format_code_values_bman() {
+        // Bman only serves FLAC — all codes map to FLAC (2)
+        assert_eq!(FormatCode::Alac.code(Service::Bman), 2);
+        assert_eq!(FormatCode::Flac.code(Service::Bman), 2);
+        assert_eq!(FormatCode::Mqa.code(Service::Bman), 2);
+        assert_eq!(FormatCode::Ra360.code(Service::Bman), 2);
+        assert_eq!(FormatCode::Aac.code(Service::Bman), 2);
+    }
+
+    #[test]
+    fn test_available_on_bman() {
+        assert!(FormatCode::Flac.available_on(Service::Bman));
+        assert!(!FormatCode::Alac.available_on(Service::Bman));
+        assert!(!FormatCode::Aac.available_on(Service::Bman));
+        assert!(!FormatCode::Mqa.available_on(Service::Bman));
+        assert!(!FormatCode::Ra360.available_on(Service::Bman));
     }
 
     #[test]

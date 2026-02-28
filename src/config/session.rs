@@ -30,6 +30,7 @@ pub fn session_cache_path_for(service: Service) -> PathBuf {
     match service {
         Service::Nugs => dir.join("session_nugs.json"),
         Service::LivePhish => dir.join("session_livephish.json"),
+        Service::Bman => dir.join("session_bman.json"),
     }
 }
 

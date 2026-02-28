@@ -256,6 +256,7 @@ impl NugsApi {
         match self.service {
             Service::Nugs => self.login_nugs(email, password).await,
             Service::LivePhish => self.login_livephish(email, password).await,
+            Service::Bman => unreachable!("Bman uses Google API key auth, not NugsApi login"),
         }
     }
 

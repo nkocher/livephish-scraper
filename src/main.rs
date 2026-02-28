@@ -1,4 +1,5 @@
 mod api;
+mod bman;
 mod browser;
 mod catalog;
 mod config;
@@ -23,6 +24,35 @@ use crate::models::show::DisplayLocation;
 use crate::models::FormatCode;
 use crate::service::router::ServiceRouter;
 use crate::service::Service;
+
+const VALID_FLAC_CONVERT: &[&str] = &["none", "alac", "aac"];
+
+/// Format an API key as a masked hint string for config prompts.
+/// Returns ` [abcd...wxyz]` for keys >8 chars, ` [****]` for shorter keys,
+/// or empty string if the key is empty.
+fn mask_api_key(key: &str) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    let masked = if key.len() > 8 {
+        format!("{}...{}", &key[..4], &key[key.len() - 4..])
+    } else {
+        "****".to_string()
+    };
+    format!(" [{masked}]")
+}
+
+/// Validate --flac-convert CLI override. Returns the value or a default.
+fn resolve_flac_convert<'a>(
+    cli_override: Option<&'a str>,
+    config_default: &'a str,
+) -> Result<&'a str> {
+    match cli_override {
+        Some(v) if VALID_FLAC_CONVERT.contains(&v) => Ok(v),
+        Some(v) => bail!("Invalid --flac-convert value: {v} (must be none, alac, or aac)"),
+        None => Ok(config_default),
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -79,6 +109,19 @@ enum Commands {
         #[arg(long)]
         flac_convert: Option<String>,
     },
+    /// Download all Bman shows for a year (Grateful Dead / JGB)
+    DownloadYear {
+        /// 4-digit year (e.g. 1977)
+        year: String,
+
+        /// Output directory
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// FLAC conversion: none, alac, aac (overrides config; default aac for Bman)
+        #[arg(long)]
+        flac_convert: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -114,6 +157,13 @@ async fn main() -> Result<()> {
             flac_convert,
         }) => {
             run_download_all(&artist, &format, output.as_deref(), flac_convert.as_deref(), cli.force_login).await?;
+        }
+        Some(Commands::DownloadYear {
+            year,
+            output,
+            flac_convert,
+        }) => {
+            run_download_year(&year, output.as_deref(), flac_convert.as_deref()).await?;
         }
         None => {
             run_interactive_browser(cli.force_login).await?;
@@ -157,16 +207,32 @@ async fn run_interactive_browser(force_login: bool) -> Result<()> {
     let mut router = ServiceRouter {
         nugs: nugs_api,
         livephish: livephish_api,
+        bman: try_init_bman(&config),
     };
 
     // Initialize catalog (load cached artist registry + show data from disk)
     let mut catalog = Catalog::new(crate::config::paths::cache_dir());
+    catalog.set_setlistfm_api_key(&config.bman.setlistfm_api_key);
     catalog.load(router.has_livephish());
 
     // Run the browser loop
     run_browser(&mut catalog, &mut router, &mut config).await;
 
     Ok(())
+}
+
+/// Initialize BmanApi if GOOGLE_API_KEY is available. Returns None if no key.
+fn try_init_bman(config: &crate::config::Config) -> Option<bman::BmanApi> {
+    if config.bman.google_api_key.is_empty() {
+        return None;
+    }
+    let mut api = bman::BmanApi::new(config.bman.google_api_key.clone());
+    // Load cached ID map if available
+    if let Some(id_map) = crate::catalog::cache::load_bman_id_map(&crate::config::paths::cache_dir()) {
+        api.id_map = id_map;
+    }
+    info!("Bman enabled (Google Drive archive)");
+    Some(api)
 }
 
 /// Try to authenticate LivePhish. Returns `Some(api)` on success, `None` on
@@ -286,12 +352,49 @@ fn run_config() -> Result<()> {
         println!("LivePhish skipped.");
     }
 
+    // === Bman / Google Drive (optional) ===
+    println!();
+    println!("=== Bman / Google Drive (optional, press Enter to skip) ===");
+
+    let gapi_hint = mask_api_key(&config.bman.google_api_key);
+    print!("Google API Key{gapi_hint}: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let mut gapi_input = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut gapi_input)?;
+    let gapi_trimmed = gapi_input.trim();
+
+    if !gapi_trimmed.is_empty() {
+        config.bman.google_api_key = gapi_trimmed.to_string();
+    }
+
+    let sfm_hint = mask_api_key(&config.bman.setlistfm_api_key);
+    print!("Setlist.fm API Key{sfm_hint}: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let mut sfm_input = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut sfm_input)?;
+    let sfm_trimmed = sfm_input.trim();
+
+    if !sfm_trimmed.is_empty() {
+        config.bman.setlistfm_api_key = sfm_trimmed.to_string();
+    }
+
+    save_config(&config);
+
+    if !config.bman.google_api_key.is_empty() {
+        println!("Bman API keys saved to config.");
+    } else {
+        println!("Bman skipped.");
+    }
+
     Ok(())
 }
 
 /// Force-refresh the catalog cache.
 async fn run_refresh() -> Result<()> {
-    let config = load_config();
+    let mut config = load_config();
+    config.normalize();
 
     let (email, password) =
         get_credentials(config.email_for(Service::Nugs)).map_err(|e| anyhow::anyhow!(e))?;
@@ -308,9 +411,11 @@ async fn run_refresh() -> Result<()> {
     let mut router = ServiceRouter {
         nugs: nugs_api,
         livephish: livephish_api,
+        bman: try_init_bman(&config),
     };
 
     let mut catalog = Catalog::new(crate::config::paths::cache_dir());
+    catalog.set_setlistfm_api_key(&config.bman.setlistfm_api_key);
     catalog.load(router.has_livephish());
 
     println!("Refreshing catalog...");
@@ -328,10 +433,16 @@ async fn run_download(
     flac_convert_override: Option<&str>,
     force_login: bool,
 ) -> Result<()> {
-    let cfg = load_config();
+    let mut cfg = load_config();
+    cfg.normalize();
 
     // Resolve output directory
     let output_dir = expand_tilde(output_override.unwrap_or(&cfg.output_dir));
+
+    // Bman shows have negative container IDs
+    if container_id < 0 {
+        return run_download_bman(container_id, &output_dir, flac_convert_override, &cfg).await;
+    }
 
     // Get credentials for nugs service
     let (email, password) =
@@ -382,11 +493,7 @@ async fn run_download(
     );
 
     // Download all tracks (CLI download is always nugs.net)
-    let flac_convert = match flac_convert_override {
-        Some(v) if ["none", "alac", "aac"].contains(&v) => v,
-        Some(v) => bail!("Invalid --flac-convert value: {v} (must be none, alac, or aac)"),
-        None => &cfg.flac_convert,
-    };
+    let flac_convert = resolve_flac_convert(flac_convert_override, &cfg.flac_convert)?;
     let outcome = download_show(
         &show,
         &tracks_with_urls,
@@ -407,6 +514,86 @@ async fn run_download(
     Ok(())
 }
 
+/// Download a single Bman show by negative container ID.
+async fn run_download_bman(
+    container_id: i64,
+    output_dir: &std::path::Path,
+    flac_convert_override: Option<&str>,
+    cfg: &crate::config::Config,
+) -> Result<()> {
+    let mut bman = try_init_bman(cfg)
+        .context("GOOGLE_API_KEY not set — run: export GOOGLE_API_KEY=<your key>")?;
+
+    // Build a minimal CatalogShow from the ID map
+    let _folder_id = bman
+        .id_map
+        .get_drive_id(container_id)
+        .context("Unknown Bman container ID — try refreshing the catalog")?;
+
+    // Load catalog to find show metadata
+    let catalog_shows = crate::catalog::cache::load_bman_cache(&crate::config::paths::cache_dir())
+        .unwrap_or_default();
+    let catalog_show = catalog_shows
+        .iter()
+        .find(|s| s.container_id == container_id)
+        .cloned()
+        .unwrap_or_else(|| crate::models::CatalogShow {
+            container_id,
+            artist_name: "Grateful Dead".to_string(),
+            container_info: format!("Bman Show {container_id}"),
+            service: Service::Bman,
+            ..Default::default()
+        });
+
+    println!("Fetching Bman show {container_id}...");
+    let mut show = bman::download::fetch_bman_show_detail(&mut bman, &catalog_show)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch Bman show: {e}"))?;
+
+    println!(
+        "{} — {} ({} tracks)",
+        show.artist_name,
+        show.display_location(),
+        show.tracks.len()
+    );
+
+    if show.tracks.is_empty() {
+        bail!("Show has no tracks");
+    }
+
+    let tracks_with_urls = bman::download::resolve_bman_tracks(&show, &bman);
+
+    if tracks_with_urls.is_empty() {
+        bail!("Could not resolve any download URLs");
+    }
+
+    // Enrich metadata before download (setlist.fm titles used for tagging)
+    bman::download::bman_enrich_metadata(&mut show, output_dir, &cfg.bman.setlistfm_api_key)
+        .await;
+
+    let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
+    let flac_convert = resolve_flac_convert(flac_convert_override, bman_default)?;
+    let outcome = download_show(
+        &show,
+        &tracks_with_urls,
+        output_dir,
+        &cfg.postprocess_codec,
+        flac_convert,
+        Service::Bman,
+        FormatCode::Flac,
+    )
+    .await;
+
+    if outcome.completed {
+        bman::download::bman_save_cover_art(&show, output_dir);
+        println!("Done!");
+    } else {
+        println!("Download cancelled.");
+    }
+
+    Ok(())
+}
+
 /// Download all shows for an artist by name or numeric ID.
 async fn run_download_all(
     artist_input: &str,
@@ -417,7 +604,8 @@ async fn run_download_all(
 ) -> Result<()> {
     use crate::catalog::ArtistTarget;
 
-    let cfg = load_config();
+    let mut cfg = load_config();
+    cfg.normalize();
     let output_dir = expand_tilde(output_override.unwrap_or(&cfg.output_dir));
     let format_code = FormatCode::from_name(format_name)
         .with_context(|| format!("Unknown format: {format_name}"))?;
@@ -437,9 +625,11 @@ async fn run_download_all(
     let mut router = ServiceRouter {
         nugs: nugs_api,
         livephish: livephish_api,
+        bman: try_init_bman(&cfg),
     };
 
     let mut catalog = Catalog::new(crate::config::paths::cache_dir());
+    catalog.set_setlistfm_api_key(&cfg.bman.setlistfm_api_key);
     catalog.load(router.has_livephish());
 
     // Resolve artist target — numeric ID or name
@@ -464,13 +654,10 @@ async fn run_download_all(
     let total = shows.len();
     println!("{artist_name}: {total} shows");
 
-    // Collect shows into owned vec (avoid borrow issues during iteration)
-    let shows_owned: Vec<crate::models::CatalogShow> = shows;
-
     let mut downloaded = 0usize;
     let mut skipped = 0usize;
 
-    for (i, catalog_show) in shows_owned.iter().enumerate() {
+    for (i, catalog_show) in shows.iter().enumerate() {
         let d = catalog_show.display_date();
         let date = if d.is_empty() { "Unknown date" } else { d };
 
@@ -481,25 +668,47 @@ async fn run_download_all(
             catalog_show.venue_name,
         );
 
-        // Fetch full show detail
-        let show = match router
-            .api_for(catalog_show.service)
-            .get_show_detail(catalog_show.container_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                println!("  \x1b[31mFailed to fetch show: {e}\x1b[0m");
-                skipped += 1;
-                continue;
-            }
+        // Fetch show detail + resolve tracks (branch on service)
+        let (mut show, tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
+            let bman = match router.bman_api() {
+                Some(b) => b,
+                None => {
+                    println!("  \x1b[31mBman API not available\x1b[0m");
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let show = match bman::download::fetch_bman_show_detail(bman, catalog_show).await {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  \x1b[31mFailed to fetch Bman show: {e}\x1b[0m");
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let twu = bman::download::resolve_bman_tracks(&show, bman);
+            let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
+            let fc = resolve_flac_convert(flac_convert_override, bman_default)?.to_string();
+            (show, twu, fc)
+        } else {
+            let show = match router
+                .api_for(catalog_show.service)
+                .get_show_detail(catalog_show.container_id)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  \x1b[31mFailed to fetch show: {e}\x1b[0m");
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let api = router.api_for(catalog_show.service);
+            let (twu, stats) = resolve_tracks(&show, api, format_code).await;
+            print_resolution_warnings(&stats, "  ");
+            let fc = resolve_flac_convert(flac_convert_override, &cfg.flac_convert)?.to_string();
+            (show, twu, fc)
         };
-
-        // Resolve tracks
-        let api = router.api_for(catalog_show.service);
-        let (tracks_with_urls, stats) = resolve_tracks(&show, api, format_code).await;
-
-        print_resolution_warnings(&stats, "  ");
 
         if tracks_with_urls.is_empty() {
             println!("  \x1b[38;5;214mNo downloadable tracks.\x1b[0m");
@@ -507,22 +716,31 @@ async fn run_download_all(
             continue;
         }
 
-        let flac_convert = match flac_convert_override {
-            Some(v) if ["none", "alac", "aac"].contains(&v) => v,
-            Some(v) => bail!("Invalid --flac-convert value: {v} (must be none, alac, or aac)"),
-            None => &cfg.flac_convert,
-        };
+        // Bman: enrich metadata before download
+        if catalog_show.service == Service::Bman {
+            bman::download::bman_enrich_metadata(
+                &mut show,
+                &output_dir,
+                &cfg.bman.setlistfm_api_key,
+            )
+            .await;
+        }
+
         let outcome = download_show_with_retry(
             &show,
             &tracks_with_urls,
             &output_dir,
             &cfg.postprocess_codec,
-            flac_convert,
+            &flac_convert,
             catalog_show.service,
             format_code,
             std::time::Duration::from_secs(30),
         )
         .await;
+
+        if catalog_show.service == Service::Bman && outcome.completed {
+            bman::download::bman_save_cover_art(&show, &output_dir);
+        }
 
         if outcome.completed {
             downloaded += 1;
@@ -532,12 +750,138 @@ async fn run_download_all(
         }
 
         // Inter-show cooldown (skip after last show)
-        if i + 1 < shows_owned.len() {
+        if i + 1 < shows.len() {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
 
     println!("\n{downloaded}/{total} shows downloaded");
+    if skipped > 0 {
+        println!("{skipped} skipped");
+    }
+
+    Ok(())
+}
+
+/// Download a batch of Bman shows with progress, retry, enrichment, and cover art.
+///
+/// Returns `(downloaded_count, skipped_count)`. Stops early if the user cancels.
+async fn download_bman_show_batch(
+    shows: &[crate::models::CatalogShow],
+    bman: &mut bman::BmanApi,
+    cfg: &crate::config::Config,
+    output_dir: &std::path::Path,
+    flac_convert_override: Option<&str>,
+) -> Result<(usize, usize)> {
+    let total = shows.len();
+    let mut downloaded = 0usize;
+    let mut skipped = 0usize;
+
+    for (i, catalog_show) in shows.iter().enumerate() {
+        let d = catalog_show.display_date();
+        let date = if d.is_empty() { "Unknown date" } else { d };
+
+        println!(
+            "\n\x1b[1;38;5;214m[{}/{}]\x1b[0m {date} \u{00b7} {}",
+            i + 1,
+            total,
+            catalog_show.venue_name,
+        );
+
+        let mut show = match bman::download::fetch_bman_show_detail(bman, catalog_show).await {
+            Ok(s) => s,
+            Err(e) => {
+                println!("  \x1b[31mFailed to fetch show: {e}\x1b[0m");
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let tracks_with_urls = bman::download::resolve_bman_tracks(&show, bman);
+
+        if tracks_with_urls.is_empty() {
+            println!("  \x1b[38;5;214mNo downloadable tracks.\x1b[0m");
+            skipped += 1;
+            continue;
+        }
+
+        bman::download::bman_enrich_metadata(&mut show, output_dir, &cfg.bman.setlistfm_api_key)
+            .await;
+
+        let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
+        let flac_convert = resolve_flac_convert(flac_convert_override, bman_default)?;
+
+        let outcome = download_show_with_retry(
+            &show,
+            &tracks_with_urls,
+            output_dir,
+            &cfg.postprocess_codec,
+            flac_convert,
+            Service::Bman,
+            FormatCode::Flac,
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        if outcome.completed {
+            bman::download::bman_save_cover_art(&show, output_dir);
+            downloaded += 1;
+        } else {
+            break;
+        }
+
+        if i + 1 < total {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    Ok((downloaded, skipped))
+}
+
+/// Download all Bman shows for a given year.
+async fn run_download_year(
+    year: &str,
+    output_override: Option<&str>,
+    flac_convert_override: Option<&str>,
+) -> Result<()> {
+    if year.len() != 4 || year.parse::<u16>().is_err() {
+        bail!("Year must be a 4-digit number (e.g. 1977)");
+    }
+
+    let mut cfg = load_config();
+    cfg.normalize();
+    let output_dir = expand_tilde(output_override.unwrap_or(&cfg.output_dir));
+
+    let mut bman = try_init_bman(&cfg)
+        .context("GOOGLE_API_KEY not set — run: export GOOGLE_API_KEY=<your key>")?;
+
+    // Load or fetch Bman catalog
+    let mut catalog = Catalog::new(crate::config::paths::cache_dir());
+    catalog.load(false);
+
+    let bman_cache = crate::catalog::cache::load_bman_cache(&crate::config::paths::cache_dir());
+    if bman_cache.is_none_or(|s| s.is_empty()) {
+        println!("Fetching Bman catalog (first run may take a few minutes)...");
+        catalog.fetch_bman_enriched(&mut bman, &cfg.bman.setlistfm_api_key)
+            .await.context("Failed to fetch Bman catalog")?;
+    }
+
+    let shows: Vec<crate::models::CatalogShow> = catalog
+        .get_shows_by_year(year)
+        .into_iter()
+        .filter(|s| s.service == Service::Bman)
+        .collect();
+
+    if shows.is_empty() {
+        bail!("No Bman shows found for year {year}");
+    }
+
+    println!("{year}: {} shows", shows.len());
+
+    let (downloaded, skipped) =
+        download_bman_show_batch(&shows, &mut bman, &cfg, &output_dir, flac_convert_override).await?;
+
+    println!("\n{downloaded}/{} shows downloaded", shows.len());
     if skipped > 0 {
         println!("{skipped} skipped");
     }

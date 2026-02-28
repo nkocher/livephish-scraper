@@ -52,5 +52,25 @@ fn push_text(tag: &mut Tag, key: ItemKey, value: String) {
     tag.push(TagItem::new(key, ItemValue::Text(value)));
 }
 
+/// Embed cover art PNG data into an audio file (M4A or FLAC).
+pub fn embed_cover_art(path: &Path, cover_png: &[u8]) -> anyhow::Result<()> {
+    use lofty::picture::{MimeType, Picture, PictureType};
+
+    let mut tagged_file = Probe::open(path)?.read()?;
+    let tag = tagged_file
+        .primary_tag_mut()
+        .ok_or_else(|| anyhow::anyhow!("No primary tag found"))?;
+
+    let picture = Picture::new_unchecked(
+        PictureType::CoverFront,
+        Some(MimeType::Png),
+        None,
+        cover_png.to_vec(),
+    );
+    tag.push_picture(picture);
+    tag.save_to_path(path, WriteOptions::default())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

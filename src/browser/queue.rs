@@ -7,6 +7,7 @@ use crate::download::download_show_with_retry;
 use crate::models::show::DisplayLocation;
 use crate::models::{CatalogShow, FormatCode};
 use crate::service::router::ServiceRouter;
+use crate::service::Service;
 
 use super::prompt::{styled_confirm, styled_fuzzy, styled_select, PromptResult};
 use super::resolve::{print_resolution_warnings, prompt_postprocess, resolve_tracks};
@@ -178,25 +179,50 @@ pub async fn download_queued_shows(
             total_shows
         );
 
-        // Fetch full show detail (route to correct API based on show's service)
-        let show = match router
-            .api_for(catalog_show.service)
-            .get_show_detail(catalog_show.container_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                println!("  \x1b[31mError fetching show: {e}\x1b[0m");
-                skipped_shows += 1;
-                continue;
-            }
+        // Fetch full show detail + resolve tracks (branch on service)
+        let (mut show, tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
+            let bman = match router.bman_api() {
+                Some(b) => b,
+                None => {
+                    println!("  \x1b[31mBman API not available\x1b[0m");
+                    skipped_shows += 1;
+                    continue;
+                }
+            };
+
+            let show = match crate::bman::download::fetch_bman_show_detail(bman, catalog_show)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  \x1b[31mError fetching Bman show: {e}\x1b[0m");
+                    skipped_shows += 1;
+                    continue;
+                }
+            };
+
+            let twu = crate::bman::download::resolve_bman_tracks(&show, bman);
+            let fc = crate::bman::download::bman_flac_convert(&config.flac_convert).to_string();
+            (show, twu, fc)
+        } else {
+            let show = match router
+                .api_for(catalog_show.service)
+                .get_show_detail(catalog_show.container_id)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("  \x1b[31mError fetching show: {e}\x1b[0m");
+                    skipped_shows += 1;
+                    continue;
+                }
+            };
+
+            let api = router.api_for(catalog_show.service);
+            let (twu, stats) = resolve_tracks(&show, api, format_code).await;
+            print_resolution_warnings(&stats, "  ");
+            (show, twu, config.flac_convert.clone())
         };
-
-        // Resolve tracks
-        let api = router.api_for(catalog_show.service);
-        let (tracks_with_urls, stats) = resolve_tracks(&show, api, format_code).await;
-
-        print_resolution_warnings(&stats, "  ");
 
         if tracks_with_urls.is_empty() {
             println!("  \x1b[38;5;214mNo downloadable tracks found.\x1b[0m");
@@ -204,17 +230,32 @@ pub async fn download_queued_shows(
             continue;
         }
 
+        // Bman: enrich metadata before download
+        if catalog_show.service == Service::Bman {
+            crate::bman::download::bman_enrich_metadata(
+                &mut show,
+                &output_dir,
+                &config.bman.setlistfm_api_key,
+            )
+            .await;
+        }
+
         let outcome = download_show_with_retry(
             &show,
             &tracks_with_urls,
             &output_dir,
             &codec,
-            &config.flac_convert,
+            &flac_convert,
             catalog_show.service,
             format_code,
             Duration::from_secs(30),
         )
         .await;
+
+        // Bman: generate + embed cover art after download
+        if catalog_show.service == Service::Bman && outcome.completed {
+            crate::bman::download::bman_save_cover_art(&show, &output_dir);
+        }
 
         if !outcome.completed {
             // User cancelled — stop remaining shows

@@ -5,6 +5,7 @@ pub enum Service {
     #[default]
     Nugs,
     LivePhish,
+    Bman,
 }
 
 /// Service-specific auth config — eliminates impossible Option states.
@@ -17,6 +18,8 @@ pub enum ServiceAuth {
     LivePhish {
         sig_key: &'static str,
     },
+    /// Bman uses a Google API key (not OAuth) — no fields needed here.
+    Bman,
 }
 
 /// Shared config fields (all services have these).
@@ -39,6 +42,7 @@ impl Service {
         match self {
             Service::Nugs => &NUGS_CONFIG,
             Service::LivePhish => &LIVEPHISH_CONFIG,
+            Service::Bman => &BMAN_CONFIG,
         }
     }
 }
@@ -72,6 +76,22 @@ static LIVEPHISH_CONFIG: ServiceConfig = ServiceConfig {
     auth: ServiceAuth::LivePhish {
         sig_key: "jdfirj8475jf_",
     },
+};
+
+/// Bman (Google Drive archive) — minimal config with generic values.
+/// Auth/stream/OAuth fields are unused; Bman uses its own BmanApi, not NugsApi.
+/// The stream_user_agent and player_url are used by download_show() for HTTP headers.
+static BMAN_CONFIG: ServiceConfig = ServiceConfig {
+    auth_url: "",
+    api_base: "https://www.googleapis.com/drive/v3/",
+    client_id: "",
+    developer_key: "",
+    user_agent: "nugs/1.0",
+    stream_user_agent: "nugs/1.0",
+    oauth_scope: "",
+    keyring_service: "bman",
+    player_url: "https://drive.google.com/",
+    auth: ServiceAuth::Bman,
 };
 
 pub mod router;
