@@ -12,6 +12,7 @@ mod tests {
     use crate::bman::id_map::BmanIdMap;
     use crate::bman::parser::*;
     use crate::bman::BmanApi;
+    use crate::catalog::build_container_info;
     use crate::catalog::cache;
     use crate::catalog::Catalog;
     use crate::models::{CatalogShow, FormatCode, Quality, Show, Track};
@@ -503,8 +504,38 @@ mod tests {
     }
 
     #[test]
-    fn test_is_flac_rejects_non_audio() {
+    fn test_is_flac_x_flac_mime() {
+        let item = make_drive_item("id", "track.flac", "audio/x-flac");
+        assert!(item.is_flac());
+    }
+
+    #[test]
+    fn test_is_flac_octet_stream_with_flac_extension() {
         let item = make_drive_item("id", "track.flac", "application/octet-stream");
+        assert!(item.is_flac());
+    }
+
+    #[test]
+    fn test_is_flac_octet_stream_uppercase_extension() {
+        let item = make_drive_item("id", "track.FLAC", "application/octet-stream");
+        assert!(item.is_flac());
+    }
+
+    #[test]
+    fn test_is_flac_octet_stream_non_flac_extension() {
+        let item = make_drive_item("id", "track.mp3", "application/octet-stream");
+        assert!(!item.is_flac());
+    }
+
+    #[test]
+    fn test_is_flac_octet_stream_no_extension() {
+        let item = make_drive_item("id", "noext", "application/octet-stream");
+        assert!(!item.is_flac());
+    }
+
+    #[test]
+    fn test_is_flac_text_plain_with_flac_extension() {
+        let item = make_drive_item("id", "track.flac", "text/plain");
         assert!(!item.is_flac());
     }
 
@@ -1241,11 +1272,14 @@ mod tests {
         let mut bman = BmanApi::new_for_test("key".into(), "root".into());
         let container_id = bman.id_map.insert(&parsed.folder_id);
 
+        let container_info =
+            build_container_info(&parsed.date, &parsed.venue, &parsed.source_tag);
+
         let catalog_show = CatalogShow {
             container_id,
             artist_id: parsed.artist.artist_id(),
             artist_name: parsed.artist.name().to_string(),
-            container_info: format!("({})", parsed.source_tag),
+            container_info,
             venue_name: parsed.venue.clone(),
             venue_city: parsed.city.clone(),
             venue_state: parsed.state.clone(),
@@ -1262,9 +1296,40 @@ mod tests {
         assert_eq!(catalog_show.venue_name, "Barton Hall");
         assert_eq!(catalog_show.venue_city, "Ithaca");
         assert_eq!(catalog_show.venue_state, "NY");
-        assert_eq!(catalog_show.container_info, "(Betty Board)");
+        assert_eq!(catalog_show.container_info, "1977-05-08 Barton Hall (Betty Board)");
         assert_eq!(catalog_show.performance_date_year, "1977");
         assert_eq!(catalog_show.service, Service::Bman);
+    }
+
+    #[test]
+    fn test_container_info_date_and_venue_no_source() {
+        assert_eq!(
+            build_container_info("1977-05-08", "Barton Hall", ""),
+            "1977-05-08 Barton Hall"
+        );
+    }
+
+    #[test]
+    fn test_container_info_date_only() {
+        assert_eq!(build_container_info("1977-05-08", "", ""), "1977-05-08");
+    }
+
+    #[test]
+    fn test_container_info_venue_and_source_no_date() {
+        assert_eq!(
+            build_container_info("", "Barton Hall", "SBD"),
+            "Barton Hall (SBD)"
+        );
+    }
+
+    #[test]
+    fn test_container_info_source_only() {
+        assert_eq!(build_container_info("", "", "SBD"), "(SBD)");
+    }
+
+    #[test]
+    fn test_container_info_all_empty() {
+        assert_eq!(build_container_info("", "", ""), "");
     }
 
     // ════════════════════════════════════════════════════════════════════

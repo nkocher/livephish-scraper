@@ -149,6 +149,20 @@ pub struct Catalog {
     setlistfm_api_key: String,
 }
 
+pub(crate) fn build_container_info(date: &str, venue: &str, source_tag: &str) -> String {
+    let parts: Vec<&str> = [date, venue].into_iter().filter(|s| !s.is_empty()).collect();
+    let mut info = parts.join(" ");
+    if !source_tag.is_empty() {
+        if info.is_empty() {
+            info = format!("({})", source_tag);
+        } else {
+            info.push(' ');
+            info.push_str(&format!("({})", source_tag));
+        }
+    }
+    info
+}
+
 impl Catalog {
     pub fn new(cache_dir: PathBuf) -> Self {
         Catalog {
@@ -681,11 +695,11 @@ impl Catalog {
                     container_id,
                     artist_id: parsed.artist.artist_id(),
                     artist_name: parsed.artist.name().to_string(),
-                    container_info: if parsed.source_tag.is_empty() {
-                        String::new()
-                    } else {
-                        format!("({})", parsed.source_tag)
-                    },
+                    container_info: build_container_info(
+                        &parsed.date,
+                        &parsed.venue,
+                        &parsed.source_tag,
+                    ),
                     venue_name: parsed.venue.clone(),
                     venue_city: parsed.city.clone(),
                     venue_state: parsed.state.clone(),

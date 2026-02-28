@@ -53,7 +53,10 @@ impl DriveItem {
     }
 
     pub fn is_flac(&self) -> bool {
-        self.mime_type == "audio/flac" || self.mime_type == "audio/x-flac"
+        self.mime_type == "audio/flac"
+            || self.mime_type == "audio/x-flac"
+            || (self.mime_type == "application/octet-stream"
+                && self.name.to_ascii_lowercase().ends_with(".flac"))
     }
 
     #[allow(dead_code)] // will be used for .txt sidecar detection
