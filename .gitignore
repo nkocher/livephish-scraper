@@ -6,6 +6,9 @@ target/
 dist/
 build/
 
+# Logs
+bman-copy-*.log
+
 # Config
 .env
 CLAUDE.md
