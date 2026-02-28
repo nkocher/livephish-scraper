@@ -158,6 +158,7 @@ pub async fn download_queued_shows(
     let mut downloaded_shows = 0usize;
     let mut skipped_shows = 0usize;
     let mut any_failures = false;
+    let sfm_keys = crate::bman::setlistfm::SetlistFmKeys::from_comma_separated(&config.bman.setlistfm_api_key);
 
     // Collect show data up front to avoid borrow issues during iteration
     let shows: Vec<(i64, CatalogShow)> =
@@ -235,7 +236,7 @@ pub async fn download_queued_shows(
             crate::bman::download::bman_enrich_metadata(
                 &mut show,
                 &output_dir,
-                &config.bman.setlistfm_api_key,
+                &sfm_keys,
             )
             .await;
         }

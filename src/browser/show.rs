@@ -342,10 +342,11 @@ async fn download_single(
 
     // Bman: enrich metadata before download (setlist.fm titles used for tagging)
     if service == Service::Bman {
+        let sfm_keys = crate::bman::setlistfm::SetlistFmKeys::from_comma_separated(&config.bman.setlistfm_api_key);
         crate::bman::download::bman_enrich_metadata(
             &mut enriched_show,
             &output_dir,
-            &config.bman.setlistfm_api_key,
+            &sfm_keys,
         )
         .await;
     }

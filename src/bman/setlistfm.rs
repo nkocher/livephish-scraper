@@ -1,20 +1,84 @@
 //! setlist.fm API client for fetching song titles by show date + artist.
 //!
-//! Returns `Ok(None)` on any failure — the caller treats this as a non-fatal
-//! miss and falls back to lower-ranked title sources.
+//! Supports multi-key rotation: when a key hits 429 (rate limit), rotates to
+//! the next key and continues. All keys exhausted → error.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Multiple setlist.fm API keys with automatic rotation on 429.
+///
+/// Build once per workflow and pass by reference so rotation state persists
+/// across calls. Uses `AtomicUsize` (not `Cell`) for `Sync` safety across
+/// `.await` points.
+pub struct SetlistFmKeys {
+    keys: Vec<String>,
+    current: AtomicUsize,
+}
+
+impl SetlistFmKeys {
+    /// Parse comma-separated API keys, trimming whitespace and filtering empties.
+    /// Duplicate keys are removed (keeps first occurrence).
+    pub fn from_comma_separated(s: &str) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let keys: Vec<String> = s
+            .split(',')
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .filter(|k| seen.insert(k.clone()))
+            .collect();
+        Self {
+            keys,
+            current: AtomicUsize::new(0),
+        }
+    }
+
+    /// The currently active API key, or `None` if no keys were provided.
+    pub fn current_key(&self) -> Option<&str> {
+        let idx = self.current.load(Ordering::Relaxed);
+        self.keys.get(idx).map(|s| s.as_str())
+    }
+
+    /// Advance to the next key. Returns `false` if all keys are exhausted.
+    pub fn rotate(&self) -> bool {
+        let next = self.current.load(Ordering::Relaxed) + 1;
+        if next < self.keys.len() {
+            self.current.store(next, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// True when no keys were provided.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Human-readable label like "key 2/4" (never logs raw key values).
+    pub fn key_label(&self) -> String {
+        let idx = self.current.load(Ordering::Relaxed) + 1;
+        format!("key {}/{}", idx, self.keys.len())
+    }
+
+    /// Total number of keys.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+}
 
 /// Query setlist.fm for the track listing of a show.
 ///
 /// `date` must be "YYYY-MM-DD". The function converts it to "DD-MM-YYYY" for
 /// the API. Returns the flattened list of song names from all sets, or
 /// `Ok(None)` if no results are found or the request fails.
+/// On 429, rotates to the next key and retries.
 pub async fn fetch_setlist(
     client: &reqwest::Client,
-    api_key: &str,
+    keys: &SetlistFmKeys,
     artist_name: &str,
     date: &str, // "YYYY-MM-DD"
 ) -> Result<Option<Vec<String>>, String> {
-    let body = query_setlistfm(client, api_key, artist_name, date).await?;
+    let body = query_with_rotation(client, keys, artist_name, date).await?;
     let Some(body) = body else { return Ok(None) };
     Ok(extract_songs(&body))
 }
@@ -30,15 +94,49 @@ pub struct SetlistVenue {
 /// Query setlist.fm for venue information for a show.
 ///
 /// `date` must be "YYYY-MM-DD". Returns venue/city/state or `Ok(None)` on miss.
+/// On 429, rotates to the next key and retries.
 pub async fn fetch_setlist_venue(
     client: &reqwest::Client,
-    api_key: &str,
+    keys: &SetlistFmKeys,
     artist_name: &str,
     date: &str,
 ) -> Result<Option<SetlistVenue>, String> {
-    let body = query_setlistfm(client, api_key, artist_name, date).await?;
+    let body = query_with_rotation(client, keys, artist_name, date).await?;
     let Some(body) = body else { return Ok(None) };
     Ok(extract_venue(&body))
+}
+
+/// Internal: query setlist.fm with automatic key rotation on 429 and
+/// single retry on 5xx server errors.
+async fn query_with_rotation(
+    client: &reqwest::Client,
+    keys: &SetlistFmKeys,
+    artist_name: &str,
+    date: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let mut retried_5xx = false;
+    loop {
+        let key = keys
+            .current_key()
+            .ok_or_else(|| "setlist.fm: all API keys exhausted".to_string())?;
+
+        match query_setlistfm(client, key, artist_name, date).await {
+            Ok(v) => return Ok(v),
+            Err(e) if e.contains("HTTP 429") => {
+                if !keys.rotate() {
+                    return Err("setlist.fm: all API keys exhausted (429 on every key)".to_string());
+                }
+                tracing::warn!("setlist.fm 429 — rotating to {}", keys.key_label());
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(e) if !retried_5xx && e.contains("HTTP 5") => {
+                retried_5xx = true;
+                tracing::warn!("setlist.fm 5xx — retrying once after 3s");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Shared HTTP request to setlist.fm search API.
@@ -402,5 +500,75 @@ mod tests {
     #[test]
     fn test_url_encode_already_safe() {
         assert_eq!(urlencoding::encode("abc123"), "abc123");
+    }
+
+    // ---- SetlistFmKeys --------------------------------------------------
+
+    #[test]
+    fn test_keys_from_comma_separated_basic() {
+        let keys = SetlistFmKeys::from_comma_separated("aaa,bbb,ccc");
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.current_key(), Some("aaa"));
+    }
+
+    #[test]
+    fn test_keys_trims_whitespace() {
+        let keys = SetlistFmKeys::from_comma_separated("  aaa , bbb , ccc  ");
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.current_key(), Some("aaa"));
+    }
+
+    #[test]
+    fn test_keys_filters_empty() {
+        let keys = SetlistFmKeys::from_comma_separated("aaa,,bbb,,,");
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn test_keys_dedup() {
+        let keys = SetlistFmKeys::from_comma_separated("aaa,bbb,aaa,ccc,bbb");
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.current_key(), Some("aaa"));
+    }
+
+    #[test]
+    fn test_keys_single_key_compat() {
+        let keys = SetlistFmKeys::from_comma_separated("single-key");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.current_key(), Some("single-key"));
+        assert!(!keys.rotate()); // only one key, can't rotate
+    }
+
+    #[test]
+    fn test_keys_empty_string() {
+        let keys = SetlistFmKeys::from_comma_separated("");
+        assert!(keys.is_empty());
+        assert_eq!(keys.current_key(), None);
+    }
+
+    #[test]
+    fn test_keys_rotation() {
+        let keys = SetlistFmKeys::from_comma_separated("k1,k2,k3");
+        assert_eq!(keys.current_key(), Some("k1"));
+        assert_eq!(keys.key_label(), "key 1/3");
+
+        assert!(keys.rotate());
+        assert_eq!(keys.current_key(), Some("k2"));
+        assert_eq!(keys.key_label(), "key 2/3");
+
+        assert!(keys.rotate());
+        assert_eq!(keys.current_key(), Some("k3"));
+        assert_eq!(keys.key_label(), "key 3/3");
+
+        assert!(!keys.rotate()); // exhausted
+        assert_eq!(keys.current_key(), Some("k3")); // stays on last
+    }
+
+    #[test]
+    fn test_keys_exhaustion() {
+        let keys = SetlistFmKeys::from_comma_separated("only");
+        assert!(!keys.rotate());
+        // current_key still works after failed rotate
+        assert_eq!(keys.current_key(), Some("only"));
     }
 }

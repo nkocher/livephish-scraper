@@ -544,11 +544,13 @@ impl Catalog {
     /// deduplicates, caches, and converts to CatalogShow.
     /// Saves partial results on mid-traversal errors.
     /// When `setlistfm_api_key` is non-empty, enriches shows missing venue data.
+    /// Accepts comma-separated keys for automatic rotation on 429.
     pub async fn fetch_bman_enriched(
         &mut self,
         bman: &mut crate::bman::BmanApi,
         setlistfm_api_key: &str,
     ) -> Result<Vec<CatalogShow>, ApiError> {
+        use crate::bman::setlistfm::SetlistFmKeys;
         use crate::bman::gdrive::FOLDER_MIME;
         use crate::bman::parser::{
             dedup_shows, is_jgb_folder, is_nll_folder, is_year_folder, BmanArtist,
@@ -597,10 +599,13 @@ impl Catalog {
         // Enrich ALL shows via setlist.fm — it's the source of truth for
         // venue/city/state. Folder names are unreliable (taper names, shn.org IDs, etc.)
         let mut aborted = false;
-        if !setlistfm_api_key.is_empty() {
+        let sfm_keys = SetlistFmKeys::from_comma_separated(setlistfm_api_key);
+        if !sfm_keys.is_empty() {
             tracing::info!(
-                "Enriching {} shows via setlist.fm...",
-                deduped.len()
+                "Enriching {} shows via setlist.fm ({} API key{})...",
+                deduped.len(),
+                sfm_keys.len(),
+                if sfm_keys.len() == 1 { "" } else { "s" },
             );
             let client = reqwest::Client::new();
             let mut enriched = 0usize;
@@ -608,32 +613,24 @@ impl Catalog {
             let total = deduped.len();
             let rate_limit = std::time::Duration::from_millis(500);
 
-            // Apply venue data from a setlist.fm result to a parsed show
-            let apply_venue = |show: &mut crate::bman::parser::ParsedShow,
-                               sv: crate::bman::setlistfm::SetlistVenue,
-                               enriched: &mut usize| {
-                show.venue = sv.venue_name;
-                show.city = sv.city;
-                show.state = sv.state;
-                *enriched += 1;
-            };
-
             for (i, show) in deduped.iter_mut().enumerate() {
                 if (i + 1) % 100 == 0 {
                     println!("  setlist.fm: {}/{} shows processed ({} enriched)...", i + 1, total, enriched);
                 }
                 let artist_name = show.artist.name();
-                let fetch = || {
-                    crate::bman::setlistfm::fetch_setlist_venue(
-                        &client,
-                        setlistfm_api_key,
-                        artist_name,
-                        &show.date,
-                    )
-                };
-                match fetch().await {
+                match crate::bman::setlistfm::fetch_setlist_venue(
+                    &client,
+                    &sfm_keys,
+                    artist_name,
+                    &show.date,
+                )
+                .await
+                {
                     Ok(Some(sv)) => {
-                        apply_venue(show, sv, &mut enriched);
+                        show.venue = sv.venue_name;
+                        show.city = sv.city;
+                        show.state = sv.state;
+                        enriched += 1;
                         consecutive_errors = 0;
                     }
                     Ok(None) => {
@@ -641,40 +638,20 @@ impl Catalog {
                     }
                     Err(e) => {
                         let e_str = e.to_string();
-                        // Permanent auth errors — bad API key, abort immediately
-                        if e_str.contains("HTTP 401") || e_str.contains("HTTP 403") {
+                        // Auth errors or all keys exhausted — abort immediately
+                        if e_str.contains("HTTP 401")
+                            || e_str.contains("HTTP 403")
+                            || e_str.contains("all API keys exhausted")
+                        {
                             tracing::warn!(
-                                "setlist.fm auth error ({}), stopping enrichment — check API key",
+                                "setlist.fm: {}, stopping enrichment",
                                 e_str
                             );
                             aborted = true;
                             break;
                         }
-                        // Transient errors (429 rate limit or 5xx server error) — retry once
-                        let is_retryable = e_str.contains("429") || e_str.contains("HTTP 5");
-                        if is_retryable {
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            match fetch().await {
-                                Ok(Some(sv)) => {
-                                    apply_venue(show, sv, &mut enriched);
-                                    consecutive_errors = 0;
-                                    tokio::time::sleep(rate_limit).await;
-                                    continue;
-                                }
-                                Ok(None) => {
-                                    consecutive_errors = 0;
-                                    tokio::time::sleep(rate_limit).await;
-                                    continue;
-                                }
-                                Err(retry_e) => {
-                                    tracing::warn!("setlist.fm retry failed for {}: {}", show.date, retry_e);
-                                    consecutive_errors += 1;
-                                }
-                            }
-                        } else {
-                            tracing::warn!("setlist.fm error for {}: {}", show.date, e_str);
-                            consecutive_errors += 1;
-                        }
+                        tracing::warn!("setlist.fm error for {}: {}", show.date, e_str);
+                        consecutive_errors += 1;
                         if consecutive_errors >= 10 {
                             tracing::warn!(
                                 "Too many consecutive setlist.fm errors, stopping enrichment"
@@ -725,7 +702,7 @@ impl Catalog {
         // Cache results + ID map + enrichment marker
         save_bman_cache(&self.cache_dir, &shows);
         save_bman_id_map(&self.cache_dir, &bman.id_map);
-        if !setlistfm_api_key.is_empty() && !aborted {
+        if !sfm_keys.is_empty() && !aborted {
             let _ = std::fs::write(self.cache_dir.join("bman_enriched.marker"), "1");
         }
 

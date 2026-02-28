@@ -373,8 +373,13 @@ fn run_config() -> Result<()> {
         config.bman.google_api_key = gapi_trimmed.to_string();
     }
 
-    let sfm_hint = mask_api_key(&config.bman.setlistfm_api_key);
-    print!("Setlist.fm API Key{sfm_hint}: ");
+    let sfm_key_count = bman::setlistfm::SetlistFmKeys::from_comma_separated(&config.bman.setlistfm_api_key).len();
+    let sfm_hint = if sfm_key_count > 1 {
+        format!(" [{sfm_key_count} keys]")
+    } else {
+        mask_api_key(&config.bman.setlistfm_api_key)
+    };
+    print!("Setlist.fm API Key(s){sfm_hint}: ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let mut sfm_input = String::new();
@@ -573,7 +578,8 @@ async fn run_download_bman(
     }
 
     // Enrich metadata before download (setlist.fm titles used for tagging)
-    bman::download::bman_enrich_metadata(&mut show, output_dir, &cfg.bman.setlistfm_api_key)
+    let sfm_keys = bman::setlistfm::SetlistFmKeys::from_comma_separated(&cfg.bman.setlistfm_api_key);
+    bman::download::bman_enrich_metadata(&mut show, output_dir, &sfm_keys)
         .await;
 
     let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
@@ -661,6 +667,7 @@ async fn run_download_all(
 
     let mut downloaded = 0usize;
     let mut skipped = 0usize;
+    let sfm_keys = bman::setlistfm::SetlistFmKeys::from_comma_separated(&cfg.bman.setlistfm_api_key);
 
     for (i, catalog_show) in shows.iter().enumerate() {
         let d = catalog_show.display_date();
@@ -726,7 +733,7 @@ async fn run_download_all(
             bman::download::bman_enrich_metadata(
                 &mut show,
                 &output_dir,
-                &cfg.bman.setlistfm_api_key,
+                &sfm_keys,
             )
             .await;
         }
@@ -783,6 +790,7 @@ async fn download_bman_show_batch(
     let total = shows.len();
     let mut downloaded = 0usize;
     let mut skipped = 0usize;
+    let sfm_keys = bman::setlistfm::SetlistFmKeys::from_comma_separated(&cfg.bman.setlistfm_api_key);
 
     for (i, catalog_show) in shows.iter().enumerate() {
         let d = catalog_show.display_date();
@@ -812,7 +820,7 @@ async fn download_bman_show_batch(
             continue;
         }
 
-        bman::download::bman_enrich_metadata(&mut show, output_dir, &cfg.bman.setlistfm_api_key)
+        bman::download::bman_enrich_metadata(&mut show, output_dir, &sfm_keys)
             .await;
 
         let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);

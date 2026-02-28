@@ -175,15 +175,13 @@ pub fn bman_flac_convert(config_flac_convert: &str) -> &str {
 pub async fn bman_enrich_metadata(
     show: &mut crate::models::Show,
     output_dir: &std::path::Path,
-    setlistfm_api_key: &str,
+    sfm_keys: &crate::bman::setlistfm::SetlistFmKeys,
 ) {
     let show_dir = output_dir.join(show.folder_name());
     // Create the show dir early so info-file step can scan it (usually empty at this point)
     let _ = std::fs::create_dir_all(&show_dir);
 
-    if let Err(e) =
-        crate::bman::metadata::resolve_metadata(&show_dir, show, setlistfm_api_key).await
-    {
+    if let Err(e) = crate::bman::metadata::resolve_metadata(&show_dir, show, sfm_keys).await {
         tracing::warn!("Metadata enrichment: {e}");
     }
 }

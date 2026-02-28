@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use tracing::{debug, warn};
 
-use crate::bman::setlistfm;
+use crate::bman::setlistfm::{self, SetlistFmKeys};
 use crate::models::Show;
 
 // ---- Title source ranking ---------------------------------------------------
@@ -49,12 +49,12 @@ static SECTION_HEADER_RE: Lazy<Regex> = Lazy::new(|| {
 /// 1. Filename-based titles — already set from parser (source=Filename), no-op
 /// 2. Vorbis comments — reads TITLE from each `.flac` file
 /// 3. Info file `.txt` — scans show_dir for a track listing
-/// 4. setlist.fm — queries by date+artist if `setlistfm_api_key` is non-empty
+/// 4. setlist.fm — queries by date+artist if `sfm_keys` is non-empty
 /// 5. Fallback — fills any still-empty titles with "Track 01", "Track 02", …
 pub async fn resolve_metadata(
     show_dir: &Path,
     show: &mut Show,
-    setlistfm_api_key: &str,
+    sfm_keys: &SetlistFmKeys,
 ) -> Result<(), String> {
     if show.tracks.is_empty() {
         return Ok(());
@@ -77,8 +77,8 @@ pub async fn resolve_metadata(
     apply_info_file(show_dir, show, &mut sources);
 
     // Step 4 — setlist.fm (async, graceful failure)
-    if !setlistfm_api_key.is_empty() {
-        apply_setlistfm(show, &mut sources, setlistfm_api_key).await;
+    if !sfm_keys.is_empty() {
+        apply_setlistfm(show, &mut sources, sfm_keys).await;
     }
 
     // Step 5 — Fallback for any tracks still without a title
@@ -310,7 +310,7 @@ pub(crate) fn parse_info_file(contents: &str) -> Vec<String> {
 async fn apply_setlistfm(
     show: &mut Show,
     sources: &mut HashMap<i64, TitleSource>,
-    api_key: &str,
+    sfm_keys: &SetlistFmKeys,
 ) {
     let date = &show.performance_date;
     let artist = &show.artist_name;
@@ -321,7 +321,7 @@ async fn apply_setlistfm(
 
     let client = reqwest::Client::new();
 
-    let result = setlistfm::fetch_setlist(&client, api_key, artist, date).await;
+    let result = setlistfm::fetch_setlist(&client, sfm_keys, artist, date).await;
 
     match result {
         Ok(Some(setlist_titles)) => {

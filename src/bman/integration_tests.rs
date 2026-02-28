@@ -1140,7 +1140,8 @@ mod tests {
         );
 
         // No setlistfm key = skip that step
-        bman_enrich_metadata(&mut show, tmp.path(), "").await;
+        let sfm_keys = crate::bman::setlistfm::SetlistFmKeys::from_comma_separated("");
+        bman_enrich_metadata(&mut show, tmp.path(), &sfm_keys).await;
 
         let expected_dir = tmp.path().join(show.folder_name());
         assert!(expected_dir.exists(), "Show dir should be created");
