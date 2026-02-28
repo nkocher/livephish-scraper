@@ -92,12 +92,15 @@ static SOURCE_TYPE_RE: Lazy<Regex> =
 static NICE_TRACK_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(\d+)(?:\s*[-.)]\s*|\s+)(.+)\.flac$").unwrap());
 
-// Matches d#t## or s#t## anywhere in the filename, with optional embedded title after.
-// Non-letter boundary before [sd] prevents matching words ending in s/d (e.g., "birds1t02").
-// Boundary is [^a-z] NOT [^a-z0-9] — digits must be allowed before s/d
+// Matches optional [sd]#t## anywhere in the filename, with optional title after.
+// Disc/set indicator is optional: handles both "d1t01" and bare "t01" (e.g., gd1992-06-11t01).
+// Non-letter boundary before the pattern prevents matching words ending in t (e.g., "font01").
+// Boundary is [^a-z] NOT [^a-z0-9] — digits must be allowed before s/d/t
 // because real filenames have "gd77-04-23d1t01.flac" where '3' precedes 'd'.
-static ETREE_TRACK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)(?:^|[^a-z])[sd](\d+)t(\d+)(?:\s+(.+))?\.flac$").unwrap());
+// Title separator: space or underscore (e.g., "t01 Bertha" or "t01_Bertha").
+static ETREE_TRACK_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[^a-z])(?:[sd](\d+))?t(\d+)(?:[\s_]+(.+))?\.flac$").unwrap()
+});
 
 // Longer prefixes (disc/disk) before the single-char 'd'.
 static DISC_SUBFOLDER_RE: Lazy<Regex> =
@@ -619,15 +622,19 @@ pub fn parse_show_folder(
 /// Parse a track filename into a `ParsedTrack`.
 ///
 /// Patterns tried in order:
-/// 1. Etree: `[sd](\d+)t(\d+)` anywhere in filename (handles prefixed names like `gd77-04-23d1t01.flac`)
+/// 1. Etree: optional `[sd]#` + `t##` anywhere in filename (handles `gd77-04-23d1t01.flac` and `gd1992-06-11t01_Bertha.flac`)
 /// 2. Nice: `(\d+) title.flac`
 ///
 /// Returns `None` if no pattern matches.
 pub fn parse_track_filename(name: &str, file_id: &str) -> Option<ParsedTrack> {
-    // Etree pattern (d1t01 / s1t01) — try before nice so "d1t01.flac" isn't ambiguous.
-    // Matches anywhere in filename to handle prefixed names like "gd77-04-23d1t01.flac".
+    // Etree pattern (d1t01 / s1t01 / t01) — try before nice so "d1t01.flac" isn't ambiguous.
+    // Disc indicator is optional: "t01" defaults to disc 1.
+    // Title separator: space or underscore ("t01 Bertha" or "t01_Bertha").
     if let Some(cap) = ETREE_TRACK_RE.captures(name) {
-        let disc_num: i64 = cap[1].parse().unwrap_or(1);
+        let disc_num: i64 = cap
+            .get(1)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(1);
         let track_num: i64 = cap[2].parse().unwrap_or(0);
         let title = cap
             .get(3)
@@ -1214,6 +1221,60 @@ mod tests {
         let track = parse_track_filename("501. Weird.flac", "fid").unwrap();
         assert_eq!(track.disc_num, 1);
         assert_eq!(track.track_num, 501);
+    }
+
+    #[test]
+    fn test_etree_track_disc_less_bare() {
+        // gd1992-06-11t01.flac — no disc indicator, no title
+        let track = parse_track_filename("gd1992-06-11t01.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert_eq!(track.title, "");
+    }
+
+    #[test]
+    fn test_etree_track_disc_less_underscore_title() {
+        // gd1992-06-11t01_Bertha.flac — no disc indicator, underscore title
+        let track = parse_track_filename("gd1992-06-11t01_Bertha.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert_eq!(track.title, "Bertha");
+    }
+
+    #[test]
+    fn test_etree_track_disc_less_underscore_multi_word() {
+        // gd1992-06-11t02_New Minglewood Blues.flac
+        let track =
+            parse_track_filename("gd1992-06-11t02_New Minglewood Blues.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 2);
+        assert_eq!(track.title, "New Minglewood Blues");
+    }
+
+    #[test]
+    fn test_etree_track_disc_less_space_title() {
+        // gd1992-06-11t19 The Mighty Quinn.flac — no disc indicator, space title
+        let track =
+            parse_track_filename("gd1992-06-11t19 The Mighty Quinn.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 19);
+        assert_eq!(track.title, "The Mighty Quinn");
+    }
+
+    #[test]
+    fn test_etree_track_with_disc_underscore_title() {
+        // gd77-04-23d1t01_Bertha.flac — disc indicator + underscore title
+        let track = parse_track_filename("gd77-04-23d1t01_Bertha.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert_eq!(track.title, "Bertha");
+    }
+
+    #[test]
+    fn test_etree_track_no_false_positive_on_words() {
+        // "font01.flac" — 'n' before 't' is a letter, should NOT match etree pattern
+        // Should fall through to NICE_TRACK_RE or return None
+        assert!(parse_track_filename("font01.flac", "fid").is_none());
     }
 
     // --- parse_disc_subfolder ---
