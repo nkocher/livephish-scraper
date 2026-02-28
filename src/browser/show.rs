@@ -353,9 +353,11 @@ async fn download_single(
     let outcome =
         download_show(&enriched_show, &tracks_with_urls, &output_dir, &codec, &flac_convert, service, format_code).await;
 
-    // Bman: generate + embed cover art after download
+    // Bman: download artwork + select best cover + embed after download
     if service == Service::Bman && outcome.completed {
-        crate::bman::download::bman_save_cover_art(&enriched_show, &output_dir);
+        if let Some(bman) = router.bman_api() {
+            crate::bman::download::bman_save_cover_art(&enriched_show, &output_dir, bman).await;
+        }
     }
 
     if outcome.completed {

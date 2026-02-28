@@ -8,12 +8,17 @@ use crate::download::TracksWithUrls;
 use crate::models::{CatalogShow, FormatCode, Quality, Show, Track};
 
 /// Parse FLAC items into tracks, optionally overriding disc_num for multi-disc shows.
+///
+/// Unmatched FLACs (those that don't match any track filename pattern) are assigned
+/// sequential track numbers after the highest parsed track, sorted alphabetically.
 pub(crate) fn collect_tracks_from_items(
     items: &[crate::bman::gdrive::DriveItem],
     disc_override: Option<i64>,
     bman: &mut BmanApi,
     tracks: &mut Vec<Track>,
 ) {
+    let mut unmatched_flacs: Vec<&crate::bman::gdrive::DriveItem> = Vec::new();
+
     for item in items {
         if !item.is_flac() {
             continue;
@@ -31,7 +36,39 @@ pub(crate) fn collect_tracks_from_items(
                 duration_seconds: 0,
                 duration_display: String::new(),
             });
+        } else {
+            unmatched_flacs.push(item);
         }
+    }
+
+    // Fallback: assign sequential track numbers to unmatched FLACs
+    if !unmatched_flacs.is_empty() {
+        unmatched_flacs.sort_by(|a, b| a.name.cmp(&b.name));
+        let max_track = tracks.iter().map(|t| t.track_num).max().unwrap_or(0);
+        let disc = disc_override.unwrap_or(1);
+        for (i, item) in unmatched_flacs.iter().enumerate() {
+            let track_id = bman.id_map.insert(&item.id);
+            let track_num = max_track + 1 + i as i64;
+            let title = item
+                .name
+                .rsplit_once('.')
+                .map_or(&*item.name, |(stem, _)| stem)
+                .to_string();
+            tracks.push(Track {
+                track_id,
+                song_id: 0,
+                song_title: title,
+                track_num,
+                disc_num: disc,
+                set_num: disc.max(1),
+                duration_seconds: 0,
+                duration_display: String::new(),
+            });
+        }
+        tracing::debug!(
+            "Assigned sequential track numbers to {} unmatched FLACs",
+            unmatched_flacs.len()
+        );
     }
 }
 
@@ -151,26 +188,53 @@ pub async fn bman_enrich_metadata(
     }
 }
 
-/// Generate and save cover art for a Bman show, then embed it in audio files.
+/// Download artwork and save cover art for a Bman show, then embed in audio files.
 ///
 /// Run AFTER `download_show()` completes so the audio files exist for embedding.
-#[cfg(feature = "bman")]
-pub fn bman_save_cover_art(show: &crate::models::Show, output_dir: &std::path::Path) {
+/// Uses 3-source priority: show-folder images → artwork catalog → generated art.
+pub async fn bman_save_cover_art(
+    show: &crate::models::Show,
+    output_dir: &std::path::Path,
+    bman: &super::BmanApi,
+) {
     let show_dir = output_dir.join(show.folder_name());
-    let png = super::cover::generate_cover(
-        &show.artist_name,
+
+    // Skip if cover already exists
+    if show_dir.join("cover.jpg").exists() || show_dir.join("cover.png").exists() {
+        return;
+    }
+
+    // Try to resolve the show's Drive folder ID for artwork download
+    let folder_id = bman.id_map.get_drive_id(show.container_id);
+    if let Some(fid) = folder_id {
+        super::artwork::download_show_artwork(bman, fid, &show_dir).await;
+    }
+
+    // Select best cover from all sources
+    let cover = super::artwork::select_best_cover(
+        &show_dir,
         &show.performance_date,
+        &bman.artwork_index,
+        bman,
+        &show.artist_name,
         &show.venue_name,
         &show.venue_city,
         &show.venue_state,
-    );
-    if png.is_empty() {
+    )
+    .await;
+
+    let Some((bytes, is_real_art)) = cover else {
         return;
-    }
-    if let Err(e) = super::cover::save_cover(&show_dir, &png) {
+    };
+
+    // Save cover file: jpg for real art, png for generated
+    let ext = if is_real_art { "cover.jpg" } else { "cover.png" };
+    let cover_path = show_dir.join(ext);
+    if let Err(e) = std::fs::write(&cover_path, &bytes) {
         tracing::warn!("Cover art save: {e}");
         return;
     }
+
     // Embed in all audio files
     if let Ok(entries) = std::fs::read_dir(&show_dir) {
         for entry in entries.flatten() {
@@ -179,16 +243,12 @@ pub fn bman_save_cover_art(show: &crate::models::Show, output_dir: &std::path::P
                 && path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .is_some_and(|ext| ext == "m4a" || ext == "flac");
+                    .is_some_and(|ext| matches!(ext, "m4a" | "flac"));
             if is_audio {
-                if let Err(e) = crate::tagger::embed_cover_art(&path, &png) {
+                if let Err(e) = crate::tagger::embed_cover_art(&path, &bytes) {
                     tracing::debug!("Cover embed {}: {e}", path.display());
                 }
             }
         }
     }
 }
-
-/// No-op when bman feature is disabled.
-#[cfg(not(feature = "bman"))]
-pub fn bman_save_cover_art(_show: &crate::models::Show, _output_dir: &std::path::Path) {}

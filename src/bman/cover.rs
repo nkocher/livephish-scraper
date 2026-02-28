@@ -397,6 +397,7 @@ pub fn generate_cover(
 }
 
 /// Save cover.png to the given directory. Returns path to saved file.
+#[allow(dead_code)] // used in integration tests
 pub fn save_cover(dir: &Path, png_data: &[u8]) -> std::io::Result<PathBuf> {
     let path = dir.join("cover.png");
     std::fs::write(&path, png_data)?;

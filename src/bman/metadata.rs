@@ -29,9 +29,10 @@ pub enum TitleSource {
 
 // ---- Compiled regexes -------------------------------------------------------
 
-/// Matches info-file track lines: `1. Title`, `01 Title`, `1) Title`.
+/// Matches info-file track lines: `1. Title`, `01-Title`, `1) Title`, `01 Title`.
+/// The alternation handles punctuation separators (dash/dot/paren) and space-only.
 static INFO_TRACK_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*(\d+)[.)]\s+(\S.*)$").unwrap()
+    Regex::new(r"^\s*(\d+)(?:\s*[-.)]\s*|\s+)(\S.*)$").unwrap()
 });
 
 /// Matches info-file section headers to skip.
@@ -468,6 +469,27 @@ mod tests {
     fn test_parse_info_file_only_headers() {
         let titles = parse_info_file("Set 1:\nEncore:\nDisc 2:");
         assert!(titles.is_empty());
+    }
+
+    #[test]
+    fn test_parse_info_file_dash_separator() {
+        let contents = "01-Song Title\n02-Another Song";
+        let titles = parse_info_file(contents);
+        assert_eq!(titles, vec!["Song Title", "Another Song"]);
+    }
+
+    #[test]
+    fn test_parse_info_file_space_only_separator() {
+        let contents = "01 Song Title\n02 Another Song";
+        let titles = parse_info_file(contents);
+        assert_eq!(titles, vec!["Song Title", "Another Song"]);
+    }
+
+    #[test]
+    fn test_parse_info_file_dash_no_space() {
+        let contents = "1-Dark Star\n2-St. Stephen";
+        let titles = parse_info_file(contents);
+        assert_eq!(titles, vec!["Dark Star", "St. Stephen"]);
     }
 
     // ---- count_track_lines --------------------------------------------------

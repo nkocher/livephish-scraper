@@ -227,9 +227,14 @@ fn try_init_bman(config: &crate::config::Config) -> Option<bman::BmanApi> {
         return None;
     }
     let mut api = bman::BmanApi::new(config.bman.google_api_key.clone());
+    let cache_dir = crate::config::paths::cache_dir();
     // Load cached ID map if available
-    if let Some(id_map) = crate::catalog::cache::load_bman_id_map(&crate::config::paths::cache_dir()) {
+    if let Some(id_map) = crate::catalog::cache::load_bman_id_map(&cache_dir) {
         api.id_map = id_map;
+    }
+    // Load cached artwork index if available
+    if let Some(idx) = bman::artwork::load_artwork_index(&cache_dir) {
+        api.artwork_index = idx;
     }
     info!("Bman enabled (Google Drive archive)");
     Some(api)
@@ -585,7 +590,7 @@ async fn run_download_bman(
     .await;
 
     if outcome.completed {
-        bman::download::bman_save_cover_art(&show, output_dir);
+        bman::download::bman_save_cover_art(&show, output_dir, &bman).await;
         println!("Done!");
     } else {
         println!("Download cancelled.");
@@ -739,7 +744,9 @@ async fn run_download_all(
         .await;
 
         if catalog_show.service == Service::Bman && outcome.completed {
-            bman::download::bman_save_cover_art(&show, &output_dir);
+            if let Some(bman) = router.bman_api() {
+                bman::download::bman_save_cover_art(&show, &output_dir, bman).await;
+            }
         }
 
         if outcome.completed {
@@ -824,7 +831,7 @@ async fn download_bman_show_batch(
         .await;
 
         if outcome.completed {
-            bman::download::bman_save_cover_art(&show, output_dir);
+            bman::download::bman_save_cover_art(&show, output_dir, bman).await;
             downloaded += 1;
         } else {
             break;

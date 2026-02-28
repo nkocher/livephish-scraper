@@ -1,3 +1,4 @@
+pub mod artwork;
 pub mod download;
 pub mod gdrive;
 pub mod id_map;
@@ -48,6 +49,8 @@ pub struct BmanApi {
     pub(crate) google_api_key: String,
     pub(crate) root_folder_id: String,
     pub id_map: BmanIdMap,
+    /// Date-keyed index of artwork catalog images.
+    pub artwork_index: artwork::ArtworkIndex,
     /// Base URL for Drive API (overrideable in tests).
     drive_base_url: String,
 }
@@ -62,6 +65,7 @@ impl BmanApi {
             google_api_key,
             root_folder_id: BMAN_ROOT_FOLDER_ID.to_string(),
             id_map: BmanIdMap::new(),
+            artwork_index: artwork::ArtworkIndex::new(),
             drive_base_url: "https://www.googleapis.com/drive/v3".to_string(),
         }
     }
@@ -76,6 +80,7 @@ impl BmanApi {
             google_api_key,
             root_folder_id,
             id_map: BmanIdMap::new(),
+            artwork_index: artwork::ArtworkIndex::new(),
             drive_base_url: "https://www.googleapis.com/drive/v3".to_string(),
         }
     }
@@ -102,6 +107,7 @@ impl BmanApi {
 
     /// List items in a folder, filtered by MIME type.
     /// Pass an empty `mime_type` to return all items.
+    /// When filtering by folder MIME, also includes shortcuts (which may point to folders).
     pub async fn list_folder_filtered(
         &self,
         folder_id: &str,
@@ -109,6 +115,13 @@ impl BmanApi {
     ) -> Result<Vec<DriveItem>, BmanError> {
         let extra_query = if mime_type.is_empty() {
             String::new()
+        } else if mime_type == gdrive::FOLDER_MIME {
+            // Also include shortcuts alongside folders
+            format!(
+                " and (mimeType='{}' or mimeType='{}')",
+                gdrive::FOLDER_MIME,
+                gdrive::SHORTCUT_MIME
+            )
         } else {
             format!(" and mimeType='{mime_type}'")
         };
@@ -157,7 +170,7 @@ impl BmanApi {
                 .query(&[
                     ("q", query.as_str()),
                     ("key", self.google_api_key.as_str()),
-                    ("fields", "files(id,name,mimeType,size),nextPageToken"),
+                    ("fields", "files(id,name,mimeType,size,shortcutDetails),nextPageToken"),
                     ("pageSize", page_size_str.as_str()),
                 ]);
 

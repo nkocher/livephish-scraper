@@ -3,6 +3,9 @@ use serde::Deserialize;
 /// Google Drive MIME type for folders.
 pub const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 
+/// Google Drive MIME type for shortcuts.
+pub const SHORTCUT_MIME: &str = "application/vnd.google-apps.shortcut";
+
 /// A single item (file or folder) from Google Drive.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,6 +15,15 @@ pub struct DriveItem {
     pub mime_type: String,
     #[allow(dead_code)] // deserialized from API, used for display
     pub size: Option<String>,
+    pub shortcut_details: Option<ShortcutDetails>,
+}
+
+/// Metadata for a Google Drive shortcut, pointing to a target file/folder.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutDetails {
+    pub target_id: String,
+    pub target_mime_type: Option<String>,
 }
 
 /// Response from Google Drive Files.list API.
@@ -50,6 +62,40 @@ pub struct DriveErrorDetail {
 impl DriveItem {
     pub fn is_folder(&self) -> bool {
         self.mime_type == FOLDER_MIME
+    }
+
+    pub fn is_shortcut(&self) -> bool {
+        self.mime_type == SHORTCUT_MIME
+    }
+
+    /// For shortcuts pointing to folders, return the target folder ID.
+    pub fn target_folder_id(&self) -> Option<&str> {
+        if !self.is_shortcut() {
+            return None;
+        }
+        let details = self.shortcut_details.as_ref()?;
+        match details.target_mime_type.as_deref() {
+            Some(FOLDER_MIME) => Some(&details.target_id),
+            _ => None,
+        }
+    }
+
+    /// Effective folder ID: either this item's ID (if it's a folder) or
+    /// the shortcut target ID (if it's a folder shortcut).
+    pub fn effective_folder_id(&self) -> Option<&str> {
+        if self.is_folder() {
+            Some(&self.id)
+        } else {
+            self.target_folder_id()
+        }
+    }
+
+    /// Parse the string `size` field into a u64 (0 if absent or unparseable).
+    pub fn size_bytes(&self) -> u64 {
+        self.size
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
     }
 
     pub fn is_flac(&self) -> bool {

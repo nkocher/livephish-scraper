@@ -70,7 +70,7 @@ static NICE_DATE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(\d{4}-\d{2}-\d{2})\s+(?:-\s+)?(.+)$").unwrap());
 
 static SOURCE_TAG_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\(([^)]+)\)\s*$").unwrap());
+    Lazy::new(|| Regex::new(r"[\[(]([^)\]]+)[\])]\s*$").unwrap());
 
 static BARE_DATE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(\d{4})[.-](\d{2})[.-](\d{2})\s*$").unwrap());
@@ -87,13 +87,17 @@ static ETREE_ARTIST_RE: Lazy<Regex> =
 static SOURCE_TYPE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\b(sbeok|sbd|betty\s*board|audience|aud|fob|matrix|mtx)\b").unwrap());
 
-// Track number, optional separator (dot/dash), then title, then .flac extension.
-// Use [-.]  so '-' is literal (at start of class).
+// Track number, separator (dot/dash/paren with optional spaces, OR just spaces), title, .flac.
+// Matches: "01. Title.flac", "01-Title.flac", "01 Title.flac", "01 - Title.flac"
 static NICE_TRACK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(\d+)\s*[-.]?\s+(.+)\.flac$").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)^(\d+)(?:\s*[-.)]\s*|\s+)(.+)\.flac$").unwrap());
 
+// Matches d#t## or s#t## anywhere in the filename, with optional embedded title after.
+// Non-letter boundary before [sd] prevents matching words ending in s/d (e.g., "birds1t02").
+// Boundary is [^a-z] NOT [^a-z0-9] — digits must be allowed before s/d
+// because real filenames have "gd77-04-23d1t01.flac" where '3' precedes 'd'.
 static ETREE_TRACK_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^d(\d+)t(\d+)").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)(?:^|[^a-z])[sd](\d+)t(\d+)(?:\s+(.+))?\.flac$").unwrap());
 
 // Longer prefixes (disc/disk) before the single-char 'd'.
 static DISC_SUBFOLDER_RE: Lazy<Regex> =
@@ -112,9 +116,25 @@ static DOT_DATE_RE: Lazy<Regex> =
 static PAREN_ETREE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\([\w.]+\)\s*").unwrap());
 
-/// Matches standalone source/format/quality words anywhere in location text.
+/// Matches standalone source/format/quality/editorial words anywhere in location text.
+/// NOTE: bare `Matrix` is NOT stripped (it's a real venue). Only taper-qualified
+/// forms like "Dusborn Matrix" or "Photoleon Matrix" are stripped.
 static LOCATION_JUNK_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(sbd|aud|audience|mtx|matrix|sbeok|betty\s*board|flac\d*|mp3|wav|incredible|1st\s+gen|c\.\s*miller)\b").unwrap()
+    Regex::new(concat!(
+        r"(?i)\b(",
+        // Source/format/quality
+        r"sbd|aud|audience|mtx|sbeok|betty\s*board|flac\d*|mp3|wav|1st\s+gen|c\.\s*miller",
+        // Editorial
+        r"|incredible|amazing|excellent|holy\s*shit|rip",
+        // Remaster notes
+        r"|remaster(?:ed)?|dan\s+wainwright\s+remaster",
+        // Set notes
+        r"|set\s*\d+|1st\s+set|2nd\s+set|early|late",
+        // Named taper patterns (matrix/board qualified by taper name)
+        r"|(?:dusborn|photoleon|betty)\s+(?:matrix|board)",
+        r")\b",
+    ))
+    .unwrap()
 });
 
 /// Nice date followed by etree-style dot metadata: `YYYY-MM-DD.stuff.stuff`
@@ -140,8 +160,12 @@ static ARTIST_PREFIX_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 static SKIP_FOLDER_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(VIDEO_TS|artwork|extras|bonus|info|text|liner\s*notes|covers?|set\s*\d+|disc\s*\d+|disk\s*\d+|cd\s*\d+|d\d+)$").unwrap()
+    Regex::new(r"(?i)^(VIDEO_TS|artwork|extras|bonus|info|text|liner\s*notes|covers?|set\s*\d+|disc\s*\d+|disk\s*\d+|cd\s*\d+|d\d+|bman.?s?\s*picks.*)$").unwrap()
 });
+
+/// Google Drive zip-download timestamp suffix: `-20250509T025938Z-001`
+static DRIVE_ZIP_SUFFIX_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"-\d{8}T\d{6}Z-\d+$").unwrap());
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -219,6 +243,9 @@ fn clean_location(text: &str) -> String {
 
     // Step 2: Strip standalone junk words
     let text = LOCATION_JUNK_RE.replace_all(text, " ");
+
+    // Step 2b: Strip orphaned square brackets (e.g., leftover from "[SBD FLAC]")
+    let text = text.replace(['[', ']'], " ");
 
     // Step 3: Clean up whitespace and separators
     let text = text
@@ -573,6 +600,10 @@ pub fn parse_show_folder(
     artist: BmanArtist,
     is_nll: bool,
 ) -> Option<ParsedShow> {
+    // Strip Google Drive zip-extract timestamp suffix before any pattern matching
+    let name = DRIVE_ZIP_SUFFIX_RE.replace(name, "");
+    let name = name.as_ref();
+
     try_parse_nice(name, folder_id, artist, is_nll)
         .or_else(|| try_parse_nice_etree_hybrid(name, folder_id, artist, is_nll))
         .or_else(|| try_parse_dot_date(name, folder_id, artist, is_nll))
@@ -588,30 +619,43 @@ pub fn parse_show_folder(
 /// Parse a track filename into a `ParsedTrack`.
 ///
 /// Patterns tried in order:
-/// 1. Etree: `d(\d+)t(\d+)` at filename start
+/// 1. Etree: `[sd](\d+)t(\d+)` anywhere in filename (handles prefixed names like `gd77-04-23d1t01.flac`)
 /// 2. Nice: `(\d+) title.flac`
 ///
 /// Returns `None` if no pattern matches.
 pub fn parse_track_filename(name: &str, file_id: &str) -> Option<ParsedTrack> {
-    // Etree pattern (d1t01) — try before nice so "d1t01.flac" isn't ambiguous
+    // Etree pattern (d1t01 / s1t01) — try before nice so "d1t01.flac" isn't ambiguous.
+    // Matches anywhere in filename to handle prefixed names like "gd77-04-23d1t01.flac".
     if let Some(cap) = ETREE_TRACK_RE.captures(name) {
         let disc_num: i64 = cap[1].parse().unwrap_or(1);
         let track_num: i64 = cap[2].parse().unwrap_or(0);
+        let title = cap
+            .get(3)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default();
         return Some(ParsedTrack {
             track_num,
             disc_num,
-            title: String::new(),
+            title,
             file_id: file_id.to_string(),
         });
     }
 
     // Nice pattern: NN [separator] title.flac
     if let Some(cap) = NICE_TRACK_RE.captures(name) {
-        let track_num: i64 = cap[1].parse().unwrap_or(0);
+        let raw_num: i64 = cap[1].parse().unwrap_or(0);
         let title = cap[2].trim().to_string();
+        // Decode 3-digit track numbers: 101 → disc 1, track 1; 209 → disc 2, track 9
+        // Guards: first digit 1-4 (realistic disc count), remainder non-zero (track 0 invalid)
+        let (disc_num, track_num) = if raw_num >= 100 && raw_num / 100 <= 4 && raw_num % 100 != 0
+        {
+            (raw_num / 100, raw_num % 100)
+        } else {
+            (1, raw_num)
+        };
         return Some(ParsedTrack {
             track_num,
-            disc_num: 1,
+            disc_num,
             title,
             file_id: file_id.to_string(),
         });
@@ -1080,6 +1124,96 @@ mod tests {
         assert!(parse_track_filename("readme.txt", "fid").is_none());
         assert!(parse_track_filename("noext", "fid").is_none());
         assert!(parse_track_filename("cover.jpg", "fid").is_none());
+    }
+
+    // --- prefixed etree track filenames ---
+
+    #[test]
+    fn test_prefixed_etree_gd_disc_track() {
+        let track = parse_track_filename("gd77-04-23d1t01.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert!(track.title.is_empty());
+    }
+
+    #[test]
+    fn test_prefixed_etree_set_track() {
+        let track = parse_track_filename("gd77-05-08s1t02.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 2);
+        assert!(track.title.is_empty());
+    }
+
+    #[test]
+    fn test_prefixed_etree_with_title() {
+        let track = parse_track_filename("gd85-03-10 s1t02 Stranger.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 2);
+        assert_eq!(track.title, "Stranger");
+    }
+
+    #[test]
+    fn test_prefixed_jgb_with_title() {
+        let track = parse_track_filename("JGB 1980-03-08d1t01 Sugaree.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert_eq!(track.title, "Sugaree");
+    }
+
+    #[test]
+    fn test_prefixed_jgb_no_space() {
+        let track = parse_track_filename("jgb1976-01-10s1t01.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+    }
+
+    #[test]
+    fn test_etree_track_still_works_bare() {
+        // Bare d1t01.flac must still work with the new regex
+        let track = parse_track_filename("d1t01.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+    }
+
+    // --- 3-digit track number decode ---
+
+    #[test]
+    fn test_three_digit_decode_101() {
+        let track = parse_track_filename("101. Tuning.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert_eq!(track.title, "Tuning");
+    }
+
+    #[test]
+    fn test_three_digit_decode_209() {
+        let track = parse_track_filename("209. Saturday.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 2);
+        assert_eq!(track.track_num, 9);
+        assert_eq!(track.title, "Saturday");
+    }
+
+    #[test]
+    fn test_three_digit_no_decode_99() {
+        let track = parse_track_filename("99 Encore.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 99);
+    }
+
+    #[test]
+    fn test_three_digit_no_decode_100() {
+        // 100 % 100 == 0, so track 0 is invalid — don't decode
+        let track = parse_track_filename("100. Intermission.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 100);
+    }
+
+    #[test]
+    fn test_three_digit_no_decode_501() {
+        // Disc 5 is unrealistic — don't decode
+        let track = parse_track_filename("501. Weird.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 501);
     }
 
     // --- parse_disc_subfolder ---
@@ -1633,6 +1767,9 @@ mod tests {
         assert!(!should_skip_folder("1977-05-08"));
         assert!(!should_skip_folder("gd77-05-08.sbd.flac16"));
         assert!(!should_skip_folder("Some Random Folder"));
+        // Bman's Picks parent folders
+        assert!(should_skip_folder("Bman's Picks Vol 36a: 9/28/75 Lindley Meadows"));
+        assert!(should_skip_folder("Bmans Picks Vol 12"));
     }
 
     // --- clean_location ---
@@ -1672,8 +1809,90 @@ mod tests {
     }
 
     #[test]
+    fn test_clean_location_dusborn_matrix_stripped() {
+        assert_eq!(
+            clean_location("Moody Coliseum, Dusborn Matrix, Dan Wainwright Remaster Set 1"),
+            "Moody Coliseum"
+        );
+    }
+
+    #[test]
+    fn test_clean_location_the_matrix_venue_preserved() {
+        // "The Matrix" is a real venue — bare "Matrix" should NOT be stripped
+        assert_eq!(
+            clean_location("The Matrix, San Francisco, CA"),
+            "The Matrix, San Francisco, CA"
+        );
+    }
+
+    #[test]
+    fn test_clean_location_remaster_stripped() {
+        assert_eq!(
+            clean_location("Winterland Remastered SBD"),
+            "Winterland"
+        );
+    }
+
+    #[test]
     fn test_clean_location_all_junk_returns_empty() {
         assert_eq!(clean_location("SBD FLAC"), "");
+    }
+
+    // --- Square bracket source tags ---
+
+    #[test]
+    fn test_bracket_source_tag() {
+        let show = parse_show_folder(
+            "1989-07-17 Alpine Valley, East Troy, WI [SBD FLAC]",
+            "fid",
+            BmanArtist::GratefulDead,
+            false,
+        )
+        .unwrap();
+        assert_eq!(show.date, "1989-07-17");
+        assert_eq!(show.source_tag, "SBD FLAC");
+        assert_eq!(show.state, "WI");
+    }
+
+    // --- Drive zip suffix stripping ---
+
+    #[test]
+    fn test_drive_zip_suffix_nice_folder() {
+        let show = parse_show_folder(
+            "1977-06-09 Winterland SBD-20250509T025938Z-001",
+            "fid",
+            BmanArtist::GratefulDead,
+            false,
+        )
+        .unwrap();
+        assert_eq!(show.date, "1977-06-09");
+        assert!(show.venue.contains("Winterland"));
+    }
+
+    #[test]
+    fn test_drive_zip_suffix_etree_folder() {
+        let show = parse_show_folder(
+            "gd77-05-21.00271.sbd.boyles.sbeok.flac16-20250509T025957Z-001",
+            "fid",
+            BmanArtist::GratefulDead,
+            false,
+        )
+        .unwrap();
+        assert_eq!(show.date, "1977-05-21");
+    }
+
+    #[test]
+    fn test_drive_zip_suffix_no_suffix_unchanged() {
+        // Folders without the suffix should parse normally
+        let show = parse_show_folder(
+            "1977-05-08 Barton Hall, Ithaca, NY (SBD)",
+            "fid",
+            BmanArtist::GratefulDead,
+            false,
+        )
+        .unwrap();
+        assert_eq!(show.date, "1977-05-08");
+        assert_eq!(show.state, "NY");
     }
 
     // --- nice-etree hybrid parser ---

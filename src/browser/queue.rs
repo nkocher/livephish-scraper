@@ -252,9 +252,11 @@ pub async fn download_queued_shows(
         )
         .await;
 
-        // Bman: generate + embed cover art after download
+        // Bman: download artwork + select best cover + embed after download
         if catalog_show.service == Service::Bman && outcome.completed {
-            crate::bman::download::bman_save_cover_art(&show, &output_dir);
+            if let Some(bman) = router.bman_api() {
+                crate::bman::download::bman_save_cover_art(&show, &output_dir, bman).await;
+            }
         }
 
         if !outcome.completed {

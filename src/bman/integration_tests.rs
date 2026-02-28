@@ -30,6 +30,7 @@ mod tests {
             name: name.to_string(),
             mime_type: mime.to_string(),
             size: None,
+            shortcut_details: None,
         }
     }
 

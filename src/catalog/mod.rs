@@ -718,6 +718,29 @@ impl Catalog {
             let _ = std::fs::write(self.cache_dir.join("bman_enriched.marker"), "1");
         }
 
+        // Build artwork index (load from cache or fetch from Drive)
+        let artwork_index = match crate::bman::artwork::load_artwork_index(&self.cache_dir) {
+            Some(idx) => {
+                tracing::debug!("Loaded artwork index from cache ({} dates)", idx.len());
+                idx
+            }
+            None => {
+                tracing::info!("Building artwork index from Drive catalog...");
+                match crate::bman::artwork::build_artwork_index(bman).await {
+                    Ok(idx) => {
+                        crate::bman::artwork::save_artwork_index(&self.cache_dir, &idx);
+                        tracing::info!("Artwork index: {} dates indexed", idx.len());
+                        idx
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to build artwork index: {e}");
+                        crate::bman::artwork::ArtworkIndex::new()
+                    }
+                }
+            }
+        };
+        bman.artwork_index = artwork_index;
+
         // Store in memory so callers don't need to manually extend
         self.shows.retain(|s| s.service != Service::Bman);
         self.shows.extend(shows.clone());
@@ -727,6 +750,7 @@ impl Catalog {
     }
 
     /// List subfolders in a Bman folder and parse each as a show.
+    /// Shortcuts are resolved to their target folder IDs.
     async fn scan_bman_folder(
         &self,
         bman: &crate::bman::BmanApi,
@@ -740,7 +764,12 @@ impl Catalog {
         match bman.list_folder_filtered(folder_id, FOLDER_MIME).await {
             Ok(show_items) => {
                 for show_item in &show_items {
-                    result.parse_item(show_item, artist, is_nll);
+                    let Some(eid) = show_item.effective_folder_id() else {
+                        continue;
+                    };
+                    let mut resolved = show_item.clone();
+                    resolved.id = eid.to_string();
+                    result.parse_item(&resolved, artist, is_nll);
                 }
             }
             Err(e) => warn!("Failed to list Bman folder {}: {}", folder_id, e),
@@ -762,11 +791,18 @@ impl Catalog {
         match bman.list_folder_filtered(folder_id, FOLDER_MIME).await {
             Ok(items) => {
                 for item in &items {
+                    // Resolve shortcuts to their target folder ID
+                    let effective_id = match item.effective_folder_id() {
+                        Some(id) => id.to_string(),
+                        None => continue, // Skip non-folder shortcuts
+                    };
                     if is_year_folder(&item.name).is_some() {
-                        self.scan_bman_folder(bman, &item.id, artist, is_nll, result)
+                        self.scan_bman_folder(bman, &effective_id, artist, is_nll, result)
                             .await;
                     } else {
-                        result.parse_item(item, artist, is_nll);
+                        let mut resolved = item.clone();
+                        resolved.id = effective_id;
+                        result.parse_item(&resolved, artist, is_nll);
                     }
                 }
             }
