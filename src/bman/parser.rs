@@ -680,17 +680,32 @@ pub fn dedup_shows(shows: Vec<ParsedShow>) -> Vec<ParsedShow> {
 
     let mut result = Vec::new();
     for (_key, mut group) in groups {
-        if group.len() == 1 {
-            result.extend(group);
-            continue;
-        }
-
         // Capture best venue data BEFORE any filtering
         let best_venue = group
             .iter()
             .filter(|s| !s.venue.is_empty())
             .max_by_key(|s| s.city.len() + s.state.len())
             .cloned();
+
+        // Drop AUD recordings first — before NLL/source-type selection.
+        // This prevents an NLL AUD from shadowing a non-NLL SBD.
+        group.retain(|s| s.source_type != SourceType::Aud);
+        if group.is_empty() {
+            continue;
+        }
+
+        if group.len() == 1 {
+            let mut winner = group.into_iter().next().unwrap();
+            if winner.venue.is_empty() {
+                if let Some(bv) = best_venue {
+                    winner.venue = bv.venue;
+                    winner.city = bv.city;
+                    winner.state = bv.state;
+                }
+            }
+            result.push(winner);
+            continue;
+        }
 
         // NLL overrides all non-NLL
         let has_nll = group.iter().any(|s| s.is_nll);
@@ -729,9 +744,6 @@ pub fn dedup_shows(shows: Vec<ParsedShow>) -> Vec<ParsedShow> {
             .cmp(&b.date)
             .then(a.artist.name().cmp(b.artist.name()))
     });
-
-    // Filter out AUD recordings entirely
-    result.retain(|s| s.source_type != SourceType::Aud);
 
     result
 }
@@ -1164,6 +1176,71 @@ mod tests {
         assert_eq!(detect_source_type("mtx.smith"), SourceType::Mtx);
         assert_eq!(detect_source_type("matrix mix"), SourceType::Mtx);
         assert_eq!(detect_source_type("flac16"), SourceType::Unknown);
+    }
+
+    #[test]
+    fn test_detect_source_type_real_etree_names() {
+        // Real folder names from Google Drive archive
+        assert_eq!(
+            detect_source_type("gd90-07-04.081523.sbd.miller.tetzeli.fix-26351.sbeok.t-flac16"),
+            SourceType::Sbd
+        );
+        assert_eq!(
+            detect_source_type("gd77-05-08.aud.berger.flac"),
+            SourceType::Aud
+        );
+        assert_eq!(
+            detect_source_type("gd73-06-10.sbd.shnf.flac16"),
+            SourceType::Sbd
+        );
+        assert_eq!(
+            detect_source_type("gd69-02-28.mtx.shnf.flac"),
+            SourceType::Mtx
+        );
+        // No source keyword → Unknown
+        assert_eq!(
+            detect_source_type("gd77-05-08.berger.flac16"),
+            SourceType::Unknown
+        );
+    }
+
+    #[test]
+    fn test_parse_etree_aud_then_dedup_drops_it() {
+        // Parse a real AUD etree folder, then dedup with an SBD version → AUD dropped
+        let aud = parse_show_folder(
+            "gd77-05-08.aud.berger.flac",
+            "fid1",
+            BmanArtist::GratefulDead,
+            false,
+        ).unwrap();
+        assert_eq!(aud.source_type, SourceType::Aud);
+
+        let sbd = parse_show_folder(
+            "gd77-05-08.sbd.miller.flac16",
+            "fid2",
+            BmanArtist::GratefulDead,
+            false,
+        ).unwrap();
+        assert_eq!(sbd.source_type, SourceType::Sbd);
+
+        let result = dedup_shows(vec![aud, sbd]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].source_type, SourceType::Sbd);
+    }
+
+    #[test]
+    fn test_parse_etree_aud_only_dedup_drops_it() {
+        // Only AUD etree folder → dedup drops it entirely
+        let aud = parse_show_folder(
+            "gd77-05-08.aud.berger.flac",
+            "fid1",
+            BmanArtist::GratefulDead,
+            false,
+        ).unwrap();
+        assert_eq!(aud.source_type, SourceType::Aud);
+
+        let result = dedup_shows(vec![aud]);
+        assert!(result.is_empty(), "AUD-only show must be filtered out");
     }
 
     // --- dedup_shows ---
@@ -1728,5 +1805,183 @@ mod tests {
         ).unwrap();
         assert_eq!(show.date, "1973-06-10");
         assert!(show.venue.contains("RFK Stadium"));
+    }
+
+    // --- NLL priority with real folder names ---
+
+    #[test]
+    fn test_nll_folder_with_gdrive_timestamp_suffix_parses() {
+        // Real NLL folder name from Google Drive (has download timestamp appended)
+        let show = parse_show_folder(
+            "1977-05-08 Cornell University Ithica NY - FLAC Dusborne Matrix-20250509T025840Z-001",
+            "fid",
+            BmanArtist::GratefulDead,
+            true, // is_nll
+        ).unwrap();
+        assert_eq!(show.date, "1977-05-08");
+        assert!(show.is_nll);
+    }
+
+    #[test]
+    fn test_nll_etree_with_gdrive_timestamp_suffix_parses() {
+        let show = parse_show_folder(
+            "gd77-05-21.00271.sbd.boyles.sbeok.flac16-20250509T025957Z-001",
+            "fid",
+            BmanArtist::GratefulDead,
+            true,
+        ).unwrap();
+        assert_eq!(show.date, "1977-05-21");
+        assert!(show.is_nll);
+        assert_eq!(show.source_type, SourceType::Sbd);
+    }
+
+    #[test]
+    fn test_nll_beats_non_nll_sbd_real_folders() {
+        // Real scenario: NLL folder + non-NLL SBD for same date
+        // NLL must win
+        let nll = parse_show_folder(
+            "1977-05-08 Cornell University Ithica NY - FLAC Dusborne Matrix-20250509T025840Z-001",
+            "nll_fid",
+            BmanArtist::GratefulDead,
+            true,
+        ).unwrap();
+        let non_nll_etree = parse_show_folder(
+            "gd77-05-08.137570.mtx.dusborne.flac16",
+            "etree_fid",
+            BmanArtist::GratefulDead,
+            false,
+        ).unwrap();
+        let non_nll_nice = parse_show_folder(
+            "1977-05-08 Cornell University Ithica NY - FLAC Dusborne Matrix",
+            "nice_fid",
+            BmanArtist::GratefulDead,
+            false,
+        ).unwrap();
+
+        let result = dedup_shows(vec![nll, non_nll_etree, non_nll_nice]);
+        assert_eq!(result.len(), 1, "Should dedup to single show");
+        assert!(result[0].is_nll, "NLL version must win");
+    }
+
+    #[test]
+    fn test_nll_aud_still_filtered_out() {
+        // NLL AUD should still be dropped by the final AUD filter
+        let nll_aud = parse_show_folder(
+            "gd1977-10-09.170283.Denver, CO.set2.aud.tiffany.andrewF.flac1648",
+            "nll_aud_fid",
+            BmanArtist::GratefulDead,
+            true,
+        ).unwrap();
+        assert!(nll_aud.is_nll);
+        assert_eq!(nll_aud.source_type, SourceType::Aud);
+
+        // If only NLL AUD exists → dropped entirely
+        let result = dedup_shows(vec![nll_aud]);
+        assert!(result.is_empty(), "NLL AUD should still be filtered out");
+    }
+
+    #[test]
+    fn test_nll_aud_does_not_shadow_non_nll_sbd() {
+        // NLL AUD + non-NLL SBD: AUD is dropped first, non-NLL SBD survives
+        let nll_aud = parse_show_folder(
+            "gd77-05-08.aud.berger.flac",
+            "nll_aud_fid",
+            BmanArtist::GratefulDead,
+            true,
+        ).unwrap();
+        let non_nll_sbd = parse_show_folder(
+            "gd77-05-08.sbd.miller.flac16",
+            "sbd_fid",
+            BmanArtist::GratefulDead,
+            false,
+        ).unwrap();
+
+        let result = dedup_shows(vec![nll_aud, non_nll_sbd]);
+        assert_eq!(result.len(), 1, "Non-NLL SBD should survive when NLL is AUD");
+        assert_eq!(result[0].source_type, SourceType::Sbd);
+        assert!(!result[0].is_nll);
+    }
+
+    // --- AUD filtering edge cases ---
+
+    #[test]
+    fn test_dedup_aud_only_date_is_dropped() {
+        // Only AUD entries exist for this date → entire date removed
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+        ];
+        let result = dedup_shows(shows);
+        assert!(result.is_empty(), "AUD-only dates must be filtered out");
+    }
+
+    #[test]
+    fn test_dedup_single_aud_show_is_dropped() {
+        // Single AUD show (group.len() == 1 fast path) → still filtered
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+        ];
+        let result = dedup_shows(shows);
+        assert!(result.is_empty(), "Single AUD show must be filtered out");
+    }
+
+    #[test]
+    fn test_dedup_unknown_source_kept() {
+        // Unknown source type is NOT dropped (only AUD is)
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Unknown, false),
+        ];
+        let result = dedup_shows(shows);
+        assert_eq!(result.len(), 1, "Unknown source should be kept");
+    }
+
+    #[test]
+    fn test_dedup_sbd_plus_aud_keeps_sbd_only() {
+        // SBD + AUD for same date → only SBD survives
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Sbd, false),
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+        ];
+        let result = dedup_shows(shows);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].source_type, SourceType::Sbd);
+    }
+
+    #[test]
+    fn test_dedup_mtx_plus_aud_keeps_mtx() {
+        // Matrix + AUD → Matrix wins (higher source type), AUD dropped
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Mtx, false),
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+        ];
+        let result = dedup_shows(shows);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].source_type, SourceType::Mtx);
+    }
+
+    #[test]
+    fn test_dedup_aud_with_different_dates_all_dropped() {
+        // Multiple dates, all AUD → all dropped
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+            gd_show("1977-09-03", "Englishtown", SourceType::Aud, false),
+        ];
+        let result = dedup_shows(shows);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_mixed_some_aud_only_dates_dropped() {
+        // Date A: SBD + AUD → keeps SBD
+        // Date B: AUD only → dropped entirely
+        let shows = vec![
+            gd_show("1977-05-08", "Cornell", SourceType::Sbd, false),
+            gd_show("1977-05-08", "Cornell", SourceType::Aud, false),
+            gd_show("1977-09-03", "Englishtown", SourceType::Aud, false),
+        ];
+        let result = dedup_shows(shows);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].date, "1977-05-08");
+        assert_eq!(result[0].source_type, SourceType::Sbd);
     }
 }
