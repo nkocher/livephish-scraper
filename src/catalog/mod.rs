@@ -181,17 +181,21 @@ impl Catalog {
         self.artist_registry = load_artist_registry(&self.cache_dir);
         self.run_registry_migration_if_needed();
 
-        // Load Bman cache (GD/JGB shows from Google Drive archive)
-        let bman_loaded = load_bman_cache(&self.cache_dir)
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                for show in &s {
-                    self.attempted_artists.insert(show.artist_id);
-                    self.loaded_artists.insert(show.artist_id);
-                }
-                self.shows.extend(s);
-            })
-            .is_some();
+        // Load Bman cache only if enrichment has been applied.
+        // If the cache exists but lacks the enrichment marker, skip loading
+        // so fetch_bman_enriched() runs on next access and enriches via setlist.fm.
+        let bman_enriched = self.cache_dir.join("bman_enriched.marker").exists();
+        let bman_loaded = bman_enriched
+            && load_bman_cache(&self.cache_dir)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    for show in &s {
+                        self.attempted_artists.insert(show.artist_id);
+                        self.loaded_artists.insert(show.artist_id);
+                    }
+                    self.shows.extend(s);
+                })
+                .is_some();
 
         // Determine which Phish artist IDs should be skipped (served from LivePhish cache)
         let livephish_loaded = has_livephish
@@ -565,61 +569,59 @@ impl Catalog {
         let mut deduped = dedup_shows(result.parsed);
         tracing::info!("{} shows after deduplication", deduped.len());
 
-        // Enrich shows missing venue data via setlist.fm
+        // Enrich ALL shows via setlist.fm — it's the source of truth for
+        // venue/city/state. Folder names are unreliable (taper names, shn.org IDs, etc.)
         if !setlistfm_api_key.is_empty() {
-            let needs_venue: usize = deduped.iter().filter(|s| s.venue.is_empty()).count();
-            if needs_venue > 0 {
-                tracing::info!(
-                    "Enriching {}/{} shows via setlist.fm...",
-                    needs_venue,
-                    deduped.len()
-                );
-                let client = reqwest::Client::new();
-                let mut enriched = 0usize;
-                let mut errors = 0usize;
-                for show in &mut deduped {
-                    if !show.venue.is_empty() {
-                        continue;
-                    }
-                    let artist_name = show.artist.name();
-                    match crate::bman::setlistfm::fetch_setlist_venue(
-                        &client,
-                        setlistfm_api_key,
-                        artist_name,
-                        &show.date,
-                    )
-                    .await
-                    {
-                        Ok(Some(sv)) => {
-                            show.venue = sv.venue_name;
-                            show.city = sv.city;
-                            show.state = sv.state;
-                            enriched += 1;
-                        }
-                        Ok(None) => {} // no setlist.fm data for this date
-                        Err(e) => {
-                            tracing::debug!("setlist.fm enrichment error for {}: {}", show.date, e);
-                            errors += 1;
-                            // Abort enrichment on repeated errors (API key invalid, etc.)
-                            if errors >= 5 {
-                                tracing::warn!(
-                                    "Too many setlist.fm errors ({}), stopping enrichment",
-                                    errors
-                                );
-                                break;
-                            }
-                        }
-                    }
-                    // Rate limit: 150ms between requests (~6.7 req/sec)
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tracing::info!(
+                "Enriching {} shows via setlist.fm...",
+                deduped.len()
+            );
+            let client = reqwest::Client::new();
+            let mut enriched = 0usize;
+            let mut consecutive_errors = 0usize;
+            let total = deduped.len();
+            for (i, show) in deduped.iter_mut().enumerate() {
+                if (i + 1) % 100 == 0 {
+                    println!("  setlist.fm: {}/{} shows processed ({} enriched)...", i + 1, total, enriched);
                 }
-                tracing::info!(
-                    "setlist.fm enriched {}/{} shows ({} errors)",
-                    enriched,
-                    needs_venue,
-                    errors
-                );
+                let artist_name = show.artist.name();
+                match crate::bman::setlistfm::fetch_setlist_venue(
+                    &client,
+                    setlistfm_api_key,
+                    artist_name,
+                    &show.date,
+                )
+                .await
+                {
+                    Ok(Some(sv)) => {
+                        show.venue = sv.venue_name;
+                        show.city = sv.city;
+                        show.state = sv.state;
+                        enriched += 1;
+                        consecutive_errors = 0;
+                    }
+                    Ok(None) => {
+                        consecutive_errors = 0;
+                    }
+                    Err(e) => {
+                        tracing::debug!("setlist.fm error for {}: {}", show.date, e);
+                        consecutive_errors += 1;
+                        if consecutive_errors >= 5 {
+                            tracing::warn!(
+                                "Too many consecutive setlist.fm errors, stopping enrichment"
+                            );
+                            break;
+                        }
+                    }
+                }
+                // Rate limit: 150ms between requests (~6.7 req/sec)
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
+            tracing::info!(
+                "setlist.fm enriched {}/{} shows",
+                enriched,
+                deduped.len()
+            );
         }
 
         // Register artists
@@ -651,9 +653,12 @@ impl Catalog {
             })
             .collect();
 
-        // Cache results + ID map
+        // Cache results + ID map + enrichment marker
         save_bman_cache(&self.cache_dir, &shows);
         save_bman_id_map(&self.cache_dir, &bman.id_map);
+        if !setlistfm_api_key.is_empty() {
+            let _ = std::fs::write(self.cache_dir.join("bman_enriched.marker"), "1");
+        }
 
         // Store in memory so callers don't need to manually extend
         self.shows.retain(|s| s.service != Service::Bman);

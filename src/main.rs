@@ -859,8 +859,11 @@ async fn run_download_year(
     let mut catalog = Catalog::new(crate::config::paths::cache_dir());
     catalog.load(false);
 
-    let bman_cache = crate::catalog::cache::load_bman_cache(&crate::config::paths::cache_dir());
-    if bman_cache.is_none_or(|s| s.is_empty()) {
+    // Re-fetch if no cache or not yet enriched via setlist.fm
+    let cache_dir = crate::config::paths::cache_dir();
+    let has_enriched_cache = cache_dir.join("bman_enriched.marker").exists()
+        && crate::catalog::cache::load_bman_cache(&cache_dir).is_some_and(|s| !s.is_empty());
+    if !has_enriched_cache {
         println!("Fetching Bman catalog (first run may take a few minutes)...");
         catalog.fetch_bman_enriched(&mut bman, &cfg.bman.setlistfm_api_key)
             .await.context("Failed to fetch Bman catalog")?;
