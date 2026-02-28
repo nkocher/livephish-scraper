@@ -509,6 +509,21 @@ impl Catalog {
         for artist_id in artist_ids {
             let _ = self.fetch_artist(router, artist_id).await;
         }
+
+        // Re-enrich Bman catalog: delete marker so fetch_bman_enriched always runs
+        if let Some(bman) = router.bman.as_mut() {
+            let sfm_key = self.setlistfm_api_key.clone();
+            if sfm_key.trim().is_empty() {
+                tracing::debug!("Skipping Bman re-enrichment: no setlist.fm API key configured");
+            } else {
+                let marker = self.cache_dir.join("bman_enriched.marker");
+                let _ = fs::remove_file(&marker);
+                println!("Re-enriching Bman catalog via setlist.fm...");
+                if let Err(e) = self.fetch_bman_enriched(bman, &sfm_key).await {
+                    tracing::warn!("Bman refresh failed: {e}");
+                }
+            }
+        }
     }
 
     /// Run artist discovery and merge into registry.
