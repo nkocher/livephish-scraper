@@ -22,13 +22,28 @@ pub struct ServiceSection {
     pub email: String,
 }
 
-/// Bman (Google Drive) configuration — API keys, not email/password.
+/// Bman (Google Drive) configuration — API keys + optional OAuth2.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BmanSection {
     #[serde(default)]
     pub google_api_key: String,
     #[serde(default)]
     pub setlistfm_api_key: String,
+    #[serde(default)]
+    pub google_client_id: String,
+    #[serde(default)]
+    pub google_client_secret: String,
+    #[serde(default)]
+    pub google_refresh_token: String,
+}
+
+impl BmanSection {
+    /// Whether all three OAuth2 credential fields are populated.
+    pub fn has_oauth_config(&self) -> bool {
+        !self.google_client_id.is_empty()
+            && !self.google_client_secret.is_empty()
+            && !self.google_refresh_token.is_empty()
+    }
 }
 
 /// User configuration (persisted as TOML).
@@ -96,17 +111,19 @@ impl Config {
         if !["none", "alac", "aac"].contains(&self.flac_convert.as_str()) {
             self.flac_convert = "none".to_string();
         }
-        // Env var overrides for Bman API keys
-        if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
-            if !key.is_empty() {
-                self.bman.google_api_key = key;
+        // Env var overrides for Bman API keys and OAuth credentials
+        fn env_override(field: &mut String, var: &str) {
+            if let Ok(val) = std::env::var(var) {
+                if !val.is_empty() {
+                    *field = val;
+                }
             }
         }
-        if let Ok(key) = std::env::var("SETLIST_FM_API_KEY") {
-            if !key.is_empty() {
-                self.bman.setlistfm_api_key = key;
-            }
-        }
+        env_override(&mut self.bman.google_api_key, "GOOGLE_API_KEY");
+        env_override(&mut self.bman.setlistfm_api_key, "SETLIST_FM_API_KEY");
+        env_override(&mut self.bman.google_client_id, "GOOGLE_CLIENT_ID");
+        env_override(&mut self.bman.google_client_secret, "GOOGLE_CLIENT_SECRET");
+        env_override(&mut self.bman.google_refresh_token, "GOOGLE_REFRESH_TOKEN");
     }
 
     /// Return the configured email for the given service.

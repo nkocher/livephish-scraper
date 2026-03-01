@@ -165,17 +165,35 @@ pub async fn fetch_bman_show_detail(
 /// Build TracksWithUrls for Bman show — direct Google Drive download URLs.
 ///
 /// Quality is always FLAC. No stream parameter resolution needed.
-pub fn resolve_bman_tracks(show: &Show, bman: &BmanApi) -> TracksWithUrls {
+/// When OAuth is configured, URLs are bare (no API key) and a Bearer token
+/// is returned for use in the Authorization header. Falls back to API-key
+/// URLs when OAuth is not available.
+pub async fn resolve_bman_tracks(show: &Show, bman: &BmanApi) -> (TracksWithUrls, Option<String>) {
     let quality = Quality::from_format_code(FormatCode::Flac);
 
-    show.tracks
+    // Get bearer token once per show (valid ~1h, a show takes minutes).
+    // With OAuth: bare URLs (auth via Authorization header).
+    // Without OAuth: API-key URLs (no header needed).
+    let bearer = bman
+        .oauth_access_token()
+        .await
+        .map(|t| format!("Bearer {t}"));
+
+    let tracks: TracksWithUrls = show
+        .tracks
         .iter()
         .filter_map(|track| {
             let drive_id = bman.id_map.get_drive_id(track.track_id)?;
-            let url = bman.download_url(drive_id);
+            let url = if bearer.is_some() {
+                format!("{}/files/{}?alt=media", bman.drive_base_url, drive_id)
+            } else {
+                bman.download_url(drive_id)
+            };
             Some((track.clone(), url, quality.clone()))
         })
-        .collect()
+        .collect();
+
+    (tracks, bearer)
 }
 
 /// Sync enriched song titles from show.tracks back to tracks_with_urls.

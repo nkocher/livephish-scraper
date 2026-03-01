@@ -183,7 +183,7 @@ pub async fn download_queued_shows(
         );
 
         // Fetch full show detail + resolve tracks (branch on service)
-        let (mut show, mut tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
+        let (mut show, mut tracks_with_urls, flac_convert, bearer) = if catalog_show.service == Service::Bman {
             let bman = match router.bman_api() {
                 Some(b) => b,
                 None => {
@@ -204,9 +204,9 @@ pub async fn download_queued_shows(
                 }
             };
 
-            let twu = crate::bman::download::resolve_bman_tracks(&show, bman);
+            let (twu, bearer) = crate::bman::download::resolve_bman_tracks(&show, bman).await;
             let fc = crate::bman::download::bman_flac_convert(&config.flac_convert).to_string();
-            (show, twu, fc)
+            (show, twu, fc, bearer)
         } else {
             let show = match router
                 .api_for(catalog_show.service)
@@ -224,7 +224,7 @@ pub async fn download_queued_shows(
             let api = router.api_for(catalog_show.service);
             let (twu, stats) = resolve_tracks(&show, api, format_code).await;
             print_resolution_warnings(&stats, "  ");
-            (show, twu, config.flac_convert.clone())
+            (show, twu, config.flac_convert.clone(), None)
         };
 
         if tracks_with_urls.is_empty() {
@@ -254,6 +254,7 @@ pub async fn download_queued_shows(
             catalog_show.service,
             format_code,
             Duration::from_secs(30),
+            bearer.as_deref(),
         )
         .await;
 

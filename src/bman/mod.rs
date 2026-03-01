@@ -3,16 +3,20 @@ pub mod download;
 pub mod gdrive;
 pub mod id_map;
 pub mod metadata;
+pub mod oauth;
 pub mod parser;
+pub mod rclone;
 pub mod setlistfm;
 #[cfg(feature = "bman")]
 pub mod cover;
 #[cfg(test)]
 mod integration_tests;
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::warn;
 
@@ -43,6 +47,22 @@ pub enum BmanError {
     Forbidden(String),
 }
 
+/// Cached OAuth2 access token with expiry.
+struct CachedToken {
+    token: String,
+    expires_at: Instant,
+}
+
+/// OAuth2 state for Google Drive Bearer auth.
+struct OAuthState {
+    client_id: String,
+    client_secret: String,
+    refresh_token: String,
+    cached: RwLock<Option<CachedToken>>,
+    /// Set to true when refresh fails with invalid_grant (revoked token).
+    disabled: AtomicBool,
+}
+
 /// Google Drive API client for Bman's archive.
 pub struct BmanApi {
     pub(crate) client: reqwest::Client,
@@ -52,7 +72,9 @@ pub struct BmanApi {
     /// Date-keyed index of artwork catalog images.
     pub artwork_index: artwork::ArtworkIndex,
     /// Base URL for Drive API (overrideable in tests).
-    drive_base_url: String,
+    pub(crate) drive_base_url: String,
+    /// Optional OAuth2 state for Bearer-authenticated downloads.
+    oauth: Option<OAuthState>,
 }
 
 impl BmanApi {
@@ -67,6 +89,7 @@ impl BmanApi {
             id_map: BmanIdMap::new(),
             artwork_index: artwork::ArtworkIndex::new(),
             drive_base_url: "https://www.googleapis.com/drive/v3".to_string(),
+            oauth: None,
         }
     }
 
@@ -82,6 +105,7 @@ impl BmanApi {
             id_map: BmanIdMap::new(),
             artwork_index: artwork::ArtworkIndex::new(),
             drive_base_url: "https://www.googleapis.com/drive/v3".to_string(),
+            oauth: None,
         }
     }
 
@@ -92,7 +116,99 @@ impl BmanApi {
         self
     }
 
-    /// Build a direct download URL for a Google Drive file.
+    /// Configure OAuth2 credentials for Bearer-authenticated downloads.
+    pub fn set_oauth(&mut self, client_id: String, client_secret: String, refresh_token: String) {
+        self.oauth = Some(OAuthState {
+            client_id,
+            client_secret,
+            refresh_token,
+            cached: RwLock::new(None),
+            disabled: AtomicBool::new(false),
+        });
+    }
+
+    /// Whether OAuth2 is configured and not disabled.
+    #[allow(dead_code)]
+    pub fn has_oauth(&self) -> bool {
+        self.oauth
+            .as_ref()
+            .is_some_and(|o| !o.disabled.load(Ordering::Relaxed))
+    }
+
+    /// Get a valid OAuth2 access token, refreshing if needed.
+    ///
+    /// Returns None if OAuth isn't configured or the refresh token was revoked.
+    /// Uses RwLock to prevent concurrent refresh stampede.
+    pub async fn oauth_access_token(&self) -> Option<String> {
+        let state = self.oauth.as_ref()?;
+        if state.disabled.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        // Fast path: check if cached token is still valid (with 60s safety margin)
+        {
+            let cached = state.cached.read().await;
+            if let Some(ref ct) = *cached {
+                if Instant::now() + Duration::from_secs(60) < ct.expires_at {
+                    return Some(ct.token.clone());
+                }
+            }
+        }
+
+        // Slow path: refresh token
+        let mut cached = state.cached.write().await;
+        // Double-check after acquiring write lock (another task may have refreshed)
+        if let Some(ref ct) = *cached {
+            if Instant::now() + Duration::from_secs(60) < ct.expires_at {
+                return Some(ct.token.clone());
+            }
+        }
+
+        match oauth::refresh_access_token(
+            &self.client,
+            &state.client_id,
+            &state.client_secret,
+            &state.refresh_token,
+        )
+        .await
+        {
+            Ok((token, expires_in)) => {
+                let ct = CachedToken {
+                    token: token.clone(),
+                    expires_at: Instant::now() + Duration::from_secs(expires_in),
+                };
+                *cached = Some(ct);
+                Some(token)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("invalid_grant") {
+                    warn!("OAuth refresh token revoked — falling back to API key");
+                    state.disabled.store(true, Ordering::Relaxed);
+                } else {
+                    warn!("OAuth token refresh failed: {e} — falling back to API key");
+                }
+                *cached = None;
+                None
+            }
+        }
+    }
+
+    /// Build a download URL and optional Bearer token for a Drive file.
+    ///
+    /// With OAuth: bare URL + Bearer header (token not in URL).
+    /// Without OAuth: API key in URL, no Bearer header.
+    #[allow(dead_code)]
+    pub async fn download_auth(&self, file_id: &str) -> (String, Option<String>) {
+        if let Some(token) = self.oauth_access_token().await {
+            let url = format!("{}/files/{}?alt=media", self.drive_base_url, file_id);
+            (url, Some(format!("Bearer {token}")))
+        } else {
+            (self.download_url(file_id), None)
+        }
+    }
+
+    /// Build a direct download URL for a Google Drive file (API key auth).
     pub fn download_url(&self, file_id: &str) -> String {
         format!(
             "{}/files/{}?alt=media&key={}",

@@ -172,6 +172,7 @@ async fn test_download_track_basic() {
         &client,
         "nugsnetAndroid",
         "https://play.nugs.net/",
+        None,
     )
     .await;
 
@@ -206,6 +207,7 @@ async fn test_download_track_server_error() {
         &client,
         "nugsnetAndroid",
         "https://play.nugs.net/",
+        None,
     )
     .await;
 
@@ -246,6 +248,7 @@ async fn test_download_track_cleans_stale_part() {
         &client,
         "nugsnetAndroid",
         "https://play.nugs.net/",
+        None,
     )
     .await;
 
@@ -300,6 +303,7 @@ async fn test_retry_succeeds_after_transient_failure() {
         &client,
         "nugsnetAndroid",
         "https://play.nugs.net/",
+        None,
         "Tweezer",
         &overall,
         Duration::ZERO,
@@ -339,6 +343,7 @@ async fn test_retry_exhausts_all_attempts() {
         &client,
         "nugsnetAndroid",
         "https://play.nugs.net/",
+        None,
         "Song",
         &overall,
         Duration::ZERO,
@@ -379,6 +384,7 @@ async fn test_retry_respects_cancellation() {
         &client,
         "nugsnetAndroid",
         "https://play.nugs.net/",
+        None,
         "Ghost",
         &overall,
         Duration::from_millis(10),
@@ -452,6 +458,7 @@ async fn test_download_track_drive_rate_limit_403() {
         &client,
         "test",
         "https://example.com",
+        None,
     )
     .await;
 
@@ -492,6 +499,7 @@ async fn test_download_track_drive_quota_exceeded_403() {
         &client,
         "test",
         "https://example.com",
+        None,
     )
     .await;
 
@@ -532,6 +540,7 @@ async fn test_download_track_drive_forbidden_403() {
         &client,
         "test",
         "https://example.com",
+        None,
     )
     .await;
 
@@ -569,6 +578,7 @@ async fn test_download_track_google_abuse_detection_403() {
         &client,
         "test",
         "https://example.com",
+        None,
     )
     .await;
 
@@ -681,6 +691,7 @@ async fn test_show_retry_recovers_failed_tracks() {
         crate::service::Service::Nugs,
         crate::models::FormatCode::Flac,
         Duration::ZERO, // no cooldown in tests
+        None,
     )
     .await;
 
@@ -719,6 +730,7 @@ async fn test_show_retry_aborts_on_no_progress() {
         crate::service::Service::Nugs,
         crate::models::FormatCode::Flac,
         Duration::ZERO,
+        None,
     )
     .await;
 

@@ -429,8 +429,8 @@ mod tests {
     //  SECTION 4: Download Pipeline (resolve_bman_tracks)
     // ════════════════════════════════════════════════════════════════════
 
-    #[test]
-    fn test_resolve_bman_tracks_produces_urls() {
+    #[tokio::test]
+    async fn test_resolve_bman_tracks_produces_urls() {
         let mut bman = BmanApi::new_for_test("key".into(), "root".into());
         let drive_id = "abc123";
         let track_id = bman.id_map.insert(drive_id);
@@ -443,7 +443,8 @@ mod tests {
             vec![make_track(track_id, "Bertha", 1, 1)],
         );
 
-        let twu = resolve_bman_tracks(&show, &bman);
+        let (twu, bearer) = resolve_bman_tracks(&show, &bman).await;
+        assert!(bearer.is_none(), "No OAuth configured, bearer should be None");
         assert_eq!(twu.len(), 1);
         let (track, url, quality) = &twu[0];
         assert_eq!(track.song_title, "Bertha");
@@ -451,8 +452,8 @@ mod tests {
         assert_eq!(quality.extension, ".flac");
     }
 
-    #[test]
-    fn test_resolve_bman_tracks_skips_unmapped() {
+    #[tokio::test]
+    async fn test_resolve_bman_tracks_skips_unmapped() {
         let bman = BmanApi::new_for_test("key".into(), "root".into());
         // Track with an ID that's not in the id_map
         let show = make_show_with_tracks(
@@ -463,7 +464,7 @@ mod tests {
             vec![make_track(-999999, "Ghost Track", 1, 1)],
         );
 
-        let twu = resolve_bman_tracks(&show, &bman);
+        let (twu, _) = resolve_bman_tracks(&show, &bman).await;
         assert!(twu.is_empty(), "Unmapped track should be filtered out");
     }
 

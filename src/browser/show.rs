@@ -318,12 +318,12 @@ async fn download_single(
         }
     };
 
-    let (mut enriched_show, mut tracks_with_urls, flac_convert) = if service == Service::Bman {
+    let (mut enriched_show, mut tracks_with_urls, flac_convert, bearer) = if service == Service::Bman {
         match router.bman_api() {
             Some(bman) => {
-                let twu = crate::bman::download::resolve_bman_tracks(show, bman);
+                let (twu, bearer) = crate::bman::download::resolve_bman_tracks(show, bman).await;
                 let fc = crate::bman::download::bman_flac_convert(&config.flac_convert);
-                (show.clone(), twu, fc.to_string())
+                (show.clone(), twu, fc.to_string(), bearer)
             }
             None => {
                 eprintln!("Bman API not available");
@@ -334,7 +334,7 @@ async fn download_single(
         let api = router.api_for(service);
         let (twu, stats) = resolve_tracks(show, api, format_code).await;
         print_resolution_warnings(&stats, "");
-        (show.clone(), twu, config.flac_convert.clone())
+        (show.clone(), twu, config.flac_convert.clone(), None)
     };
 
     if tracks_with_urls.is_empty() {
@@ -359,7 +359,7 @@ async fn download_single(
     }
 
     let outcome =
-        download_show(&enriched_show, &tracks_with_urls, &output_dir, &codec, &flac_convert, service, format_code).await;
+        download_show(&enriched_show, &tracks_with_urls, &output_dir, &codec, &flac_convert, service, format_code, bearer.as_deref()).await;
 
     // Bman: download artwork + select best cover + embed after download
     if service == Service::Bman && outcome.completed {

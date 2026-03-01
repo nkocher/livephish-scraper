@@ -122,6 +122,7 @@ fn part_path(dest: &Path) -> PathBuf {
 /// The caller provides the ProgressBar (for progress updates or hidden)
 /// and the cancel flag (shared AtomicBool for Escape detection).
 /// Writes to a `.part` file and atomically renames on success.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_track(
     url: &str,
     dest: &Path,
@@ -130,17 +131,20 @@ pub async fn download_track(
     client: &reqwest::Client,
     user_agent: &str,
     referer: &str,
+    authorization: Option<&str>,
 ) -> Result<PathBuf, anyhow::Error> {
     let part = part_path(dest);
     let _ = std::fs::remove_file(&part);
 
-    let response = client
+    let mut req = client
         .get(url)
         .header("Referer", referer)
         .header("User-Agent", user_agent)
-        .header("Range", "bytes=0-")
-        .send()
-        .await?;
+        .header("Range", "bytes=0-");
+    if let Some(auth) = authorization {
+        req = req.header("Authorization", auth);
+    }
+    let response = req.send().await?;
 
     let status = response.status();
     if status == reqwest::StatusCode::FORBIDDEN {
@@ -229,6 +233,7 @@ async fn download_track_with_retry(
     client: &reqwest::Client,
     user_agent: &str,
     referer: &str,
+    authorization: Option<&str>,
     track_title: &str,
     overall: &ProgressBar,
     base_backoff: Duration,
@@ -254,7 +259,7 @@ async fn download_track_with_retry(
         }
 
         let hidden_pb = ProgressBar::hidden();
-        match download_track(url, dest, &hidden_pb, cancel, client, user_agent, referer).await {
+        match download_track(url, dest, &hidden_pb, cancel, client, user_agent, referer, authorization).await {
             Ok(path) => return Ok(path),
             Err(e) => {
                 if e.to_string().contains("cancelled") {
@@ -297,6 +302,7 @@ enum TrackResult {
 /// bar with `pb.println()` for per-track completion messages. This avoids
 /// MultiProgress rendering issues with concurrent bar insertion/removal.
 /// Returns a `DownloadOutcome` with completion status and failure count.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_show(
     show: &Show,
     tracks_with_urls: &TracksWithUrls,
@@ -305,6 +311,7 @@ pub async fn download_show(
     flac_convert: &str,
     service: Service,
     requested_format: FormatCode,
+    authorization: Option<&str>,
 ) -> DownloadOutcome {
     let show_dir = output_dir.join(show.folder_name());
     if let Err(e) = std::fs::create_dir_all(&show_dir) {
@@ -421,10 +428,11 @@ pub async fn download_show(
 
     // ── Phase 2: Parallel download ──────────────────────────────────
     let download_count = to_download.len();
-    let concurrent = if service == Service::Bman {
-        BMAN_MAX_CONCURRENT.min(download_count)
-    } else {
-        MAX_CONCURRENT.min(download_count)
+    // Bman API-key downloads are throttled to 1 concurrent to avoid Google abuse
+    // detection. OAuth-authenticated requests use the normal concurrency limit.
+    let concurrent = match (service, authorization.is_some()) {
+        (Service::Bman, false) => BMAN_MAX_CONCURRENT.min(download_count),
+        _ => MAX_CONCURRENT.min(download_count),
     };
 
     println!(
@@ -454,6 +462,7 @@ pub async fn download_show(
 
     let mut handles = Vec::new();
     let bman_first_track = Arc::new(AtomicBool::new(true));
+    let auth_header: Option<String> = authorization.map(|s| s.to_string());
 
     for (track, url, _quality, download_dest, conversion) in to_download {
         let sem = semaphore.clone();
@@ -463,6 +472,7 @@ pub async fn download_show(
         let show_ref = show_arc.clone();
         let codec_ref = codec.clone();
         let client_ref = client.clone();
+        let auth_ref = auth_header.clone();
 
         let handle = tokio::spawn(async move {
             // Check cancellation before waiting for a permit so queued
@@ -481,9 +491,13 @@ pub async fn download_show(
                 return TrackResult::Cancelled;
             }
 
-            // Throttle Bman (Google Drive) downloads to avoid abuse detection.
+            // Throttle Bman (Google Drive) API-key downloads to avoid abuse detection.
+            // OAuth-authenticated requests skip the delay (higher quota).
             // Skip delay for the first track — throttle is between tracks, not before.
-            if service == Service::Bman && !first_track.swap(false, Ordering::Relaxed) {
+            if service == Service::Bman
+                && auth_ref.is_none()
+                && !first_track.swap(false, Ordering::Relaxed)
+            {
                 tokio::time::sleep(Duration::from_millis(BMAN_INTER_TRACK_DELAY_MS)).await;
             }
 
@@ -494,6 +508,7 @@ pub async fn download_show(
                 &client_ref,
                 stream_ua,
                 referer,
+                auth_ref.as_deref(),
                 &track.song_title,
                 &overall,
                 Duration::from_secs(DOWNLOAD_RETRY_BASE_SECS),
@@ -625,6 +640,7 @@ pub async fn download_show_with_retry(
     service: Service,
     requested_format: FormatCode,
     pass_cooldown: Duration,
+    authorization: Option<&str>,
 ) -> DownloadOutcome {
     const MAX_SHOW_RETRIES: u32 = 2; // 3 total passes
 
@@ -639,6 +655,7 @@ pub async fn download_show_with_retry(
             flac_convert,
             service,
             requested_format,
+            authorization,
         )
         .await;
 

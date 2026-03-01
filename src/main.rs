@@ -242,7 +242,27 @@ fn try_init_bman(config: &crate::config::Config) -> Option<bman::BmanApi> {
     if let Some(idx) = bman::artwork::load_artwork_index(&cache_dir) {
         api.artwork_index = idx;
     }
-    info!("Bman enabled (Google Drive archive)");
+
+    // OAuth: try config fields first, then auto-import from rclone
+    let oauth_creds = if config.bman.has_oauth_config() {
+        Some((
+            config.bman.google_client_id.clone(),
+            config.bman.google_client_secret.clone(),
+            config.bman.google_refresh_token.clone(),
+        ))
+    } else {
+        bman::rclone::load_rclone_credentials().map(|c| {
+            info!("Loaded Google OAuth from rclone config");
+            (c.client_id, c.client_secret, c.refresh_token)
+        })
+    };
+
+    if let Some((id, secret, refresh)) = oauth_creds {
+        api.set_oauth(id, secret, refresh);
+        info!("Bman enabled (Google Drive archive, OAuth)");
+    } else {
+        info!("Bman enabled (Google Drive archive, API key only)");
+    }
     Some(api)
 }
 
@@ -550,6 +570,7 @@ async fn run_download(
         flac_convert,
         Service::Nugs,
         format_code,
+        None,
     )
     .await;
 
@@ -611,7 +632,7 @@ async fn run_download_bman(
         bail!("Show has no tracks");
     }
 
-    let mut tracks_with_urls = bman::download::resolve_bman_tracks(&show, &bman);
+    let (mut tracks_with_urls, bearer) = bman::download::resolve_bman_tracks(&show, &bman).await;
 
     if tracks_with_urls.is_empty() {
         bail!("Could not resolve any download URLs");
@@ -634,6 +655,7 @@ async fn run_download_bman(
         flac_convert,
         Service::Bman,
         FormatCode::Flac,
+        bearer.as_deref(),
     )
     .await;
 
@@ -725,7 +747,7 @@ async fn run_download_all(
         );
 
         // Fetch show detail + resolve tracks (branch on service)
-        let (mut show, mut tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
+        let (mut show, mut tracks_with_urls, flac_convert, bearer) = if catalog_show.service == Service::Bman {
             let bman = match router.bman_api() {
                 Some(b) => b,
                 None => {
@@ -742,10 +764,10 @@ async fn run_download_all(
                     continue;
                 }
             };
-            let twu = bman::download::resolve_bman_tracks(&show, bman);
+            let (twu, bearer) = bman::download::resolve_bman_tracks(&show, bman).await;
             let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
             let fc = resolve_flac_convert(flac_convert_override, bman_default)?.to_string();
-            (show, twu, fc)
+            (show, twu, fc, bearer)
         } else {
             let show = match router
                 .api_for(catalog_show.service)
@@ -763,7 +785,7 @@ async fn run_download_all(
             let (twu, stats) = resolve_tracks(&show, api, format_code).await;
             print_resolution_warnings(&stats, "  ");
             let fc = resolve_flac_convert(flac_convert_override, &cfg.flac_convert)?.to_string();
-            (show, twu, fc)
+            (show, twu, fc, None)
         };
 
         if tracks_with_urls.is_empty() {
@@ -793,6 +815,7 @@ async fn run_download_all(
             catalog_show.service,
             format_code,
             std::time::Duration::from_secs(30),
+            bearer.as_deref(),
         )
         .await;
 
@@ -862,7 +885,7 @@ async fn download_bman_show_batch(
             }
         };
 
-        let mut tracks_with_urls = bman::download::resolve_bman_tracks(&show, bman);
+        let (mut tracks_with_urls, bearer) = bman::download::resolve_bman_tracks(&show, bman).await;
 
         if tracks_with_urls.is_empty() {
             println!("  \x1b[38;5;214mNo downloadable tracks.\x1b[0m");
@@ -886,6 +909,7 @@ async fn download_bman_show_batch(
             Service::Bman,
             FormatCode::Flac,
             std::time::Duration::from_secs(30),
+            bearer.as_deref(),
         )
         .await;
 

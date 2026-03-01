@@ -265,6 +265,7 @@ async fn download_playlist(playlist: &Playlist, api: &mut NugsApi, config: &mut 
             &client,
             svc.stream_user_agent,
             svc.player_url,
+            None,
         )
         .await
         {
