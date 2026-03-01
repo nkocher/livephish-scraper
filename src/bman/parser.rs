@@ -102,6 +102,12 @@ static ETREE_TRACK_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)(?:^|[^a-z])(?:[sd](\d+))?t(\d+)(?:[\s_]+(.+))?\.flac$").unwrap()
 });
 
+// Matches "set{D}{TT}" pattern: e.g. gd1994-06-17set101.flac → disc 1, track 01.
+// First digit after "set" is the disc/set number (1-4), remaining digits are the track.
+static SET_TRACK_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)set([1-4])(\d{2,})\.flac$").unwrap()
+});
+
 // Longer prefixes (disc/disk) before the single-char 'd'.
 static DISC_SUBFOLDER_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(?:disc|disk|cd|set|d)\s*(\d+)$").unwrap());
@@ -644,6 +650,19 @@ pub fn parse_track_filename(name: &str, file_id: &str) -> Option<ParsedTrack> {
             track_num,
             disc_num,
             title,
+            file_id: file_id.to_string(),
+        });
+    }
+
+    // "set{D}{TT}" pattern: gd1994-06-17set101.flac → disc 1, track 01.
+    // Must come after ETREE_TRACK_RE (which handles s1t01) but before NICE_TRACK_RE.
+    if let Some(cap) = SET_TRACK_RE.captures(name) {
+        let disc_num: i64 = cap[1].parse().unwrap_or(1);
+        let track_num: i64 = cap[2].parse().unwrap_or(0);
+        return Some(ParsedTrack {
+            track_num,
+            disc_num,
+            title: String::new(), // No title in these filenames; filled from cache
             file_id: file_id.to_string(),
         });
     }
@@ -1268,6 +1287,33 @@ mod tests {
         assert_eq!(track.disc_num, 1);
         assert_eq!(track.track_num, 1);
         assert_eq!(track.title, "Bertha");
+    }
+
+    #[test]
+    fn test_set_track_pattern_set1() {
+        // gd1994-06-17set101.flac → disc 1, track 01
+        let track = parse_track_filename("gd1994-06-17set101.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 1);
+        assert_eq!(track.track_num, 1);
+        assert!(track.title.is_empty());
+    }
+
+    #[test]
+    fn test_set_track_pattern_set2() {
+        // gd1994-06-17set209.flac → disc 2, track 09
+        let track = parse_track_filename("gd1994-06-17set209.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 2);
+        assert_eq!(track.track_num, 9);
+        assert!(track.title.is_empty());
+    }
+
+    #[test]
+    fn test_set_track_pattern_set3() {
+        // gd1989-10-09set312.flac → disc 3, track 12
+        let track = parse_track_filename("gd1989-10-09set312.flac", "fid").unwrap();
+        assert_eq!(track.disc_num, 3);
+        assert_eq!(track.track_num, 12);
+        assert!(track.title.is_empty());
     }
 
     #[test]

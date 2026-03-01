@@ -159,6 +159,8 @@ pub async fn download_queued_shows(
     let mut skipped_shows = 0usize;
     let mut any_failures = false;
     let sfm_keys = crate::bman::setlistfm::SetlistFmKeys::from_comma_separated(&config.bman.setlistfm_api_key);
+    let cache_dir = crate::config::paths::cache_dir();
+    let mut sfm_cache = crate::bman::setlistfm::SfmCache::load(&cache_dir);
 
     // Collect show data up front to avoid borrow issues during iteration
     let shows: Vec<(i64, CatalogShow)> =
@@ -181,7 +183,7 @@ pub async fn download_queued_shows(
         );
 
         // Fetch full show detail + resolve tracks (branch on service)
-        let (mut show, tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
+        let (mut show, mut tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
             let bman = match router.bman_api() {
                 Some(b) => b,
                 None => {
@@ -191,7 +193,7 @@ pub async fn download_queued_shows(
                 }
             };
 
-            let show = match crate::bman::download::fetch_bman_show_detail(bman, catalog_show)
+            let show = match crate::bman::download::fetch_bman_show_detail(bman, catalog_show, &sfm_cache)
                 .await
             {
                 Ok(s) => s,
@@ -237,8 +239,10 @@ pub async fn download_queued_shows(
                 &mut show,
                 &output_dir,
                 &sfm_keys,
+                &mut sfm_cache,
             )
             .await;
+            crate::bman::download::sync_enriched_titles(&show, &mut tracks_with_urls);
         }
 
         let outcome = download_show_with_retry(
@@ -274,6 +278,8 @@ pub async fn download_queued_shows(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
+
+    sfm_cache.save();
 
     // Summary
     let mut parts = vec![format!(

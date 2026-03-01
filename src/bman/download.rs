@@ -3,6 +3,7 @@
 /// These produce the same output types as the nugs/LivePhish path so the
 /// existing `download_show()` pipeline works unchanged.
 use crate::bman::parser::{parse_disc_subfolder, parse_track_filename};
+use crate::bman::setlistfm::{SfmCache, SfmStatus};
 use crate::bman::BmanApi;
 use crate::download::TracksWithUrls;
 use crate::models::{CatalogShow, FormatCode, Quality, Show, Track};
@@ -76,9 +77,12 @@ pub(crate) fn collect_tracks_from_items(
 ///
 /// Resolves the synthetic container_id back to a Drive folder via id_map,
 /// lists FLAC files, parses track filenames, and builds a full `Show`.
+/// Applies cached setlist.fm titles to empty tracks by position so titles
+/// flow into `resolve_bman_tracks` → `tracks_with_urls` → filenames + tags.
 pub async fn fetch_bman_show_detail(
     bman: &mut BmanApi,
     catalog_show: &CatalogShow,
+    sfm_cache: &SfmCache,
 ) -> Result<Show, String> {
     let container_id = catalog_show.container_id;
     let folder_id = bman
@@ -123,6 +127,23 @@ pub async fn fetch_bman_show_detail(
     // Sort by disc then track number
     tracks.sort_by_key(|t| (t.disc_num, t.track_num));
 
+    // Apply cached setlist.fm titles to empty tracks by position.
+    // This covers 917/928 shows so titles are available before the clone
+    // in resolve_bman_tracks, fixing filenames like "01. .m4a".
+    if let Some(SfmStatus::Found { songs, .. }) =
+        sfm_cache.lookup(&catalog_show.artist_name, &catalog_show.performance_date)
+    {
+        for (i, track) in tracks.iter_mut().enumerate() {
+            if track.song_title.is_empty() {
+                if let Some(title) = songs.get(i) {
+                    if !title.is_empty() {
+                        track.song_title = title.clone();
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Show {
         container_id,
         artist_name: catalog_show.artist_name.clone(),
@@ -157,6 +178,22 @@ pub fn resolve_bman_tracks(show: &Show, bman: &BmanApi) -> TracksWithUrls {
         .collect()
 }
 
+/// Sync enriched song titles from show.tracks back to tracks_with_urls.
+///
+/// After `bman_enrich_metadata` enriches `show.tracks` (via Vorbis comments,
+/// info files, setlist.fm, or fallback), the separate `tracks_with_urls` clone
+/// still has stale titles. This copies the final titles back so `download_show`
+/// uses correct titles for filenames and audio tags.
+pub fn sync_enriched_titles(show: &Show, tracks_with_urls: &mut TracksWithUrls) {
+    for (track, _, _) in tracks_with_urls.iter_mut() {
+        if let Some(enriched) = show.tracks.iter().find(|t| t.track_id == track.track_id) {
+            if track.song_title != enriched.song_title {
+                track.song_title = enriched.song_title.clone();
+            }
+        }
+    }
+}
+
 /// Effective flac_convert for Bman: defaults to "aac" unless user explicitly set something else.
 pub fn bman_flac_convert(config_flac_convert: &str) -> &str {
     if config_flac_convert.is_empty() || config_flac_convert == "none" {
@@ -176,12 +213,13 @@ pub async fn bman_enrich_metadata(
     show: &mut crate::models::Show,
     output_dir: &std::path::Path,
     sfm_keys: &crate::bman::setlistfm::SetlistFmKeys,
+    sfm_cache: &mut crate::bman::setlistfm::SfmCache,
 ) {
     let show_dir = output_dir.join(show.folder_name());
     // Create the show dir early so info-file step can scan it (usually empty at this point)
     let _ = std::fs::create_dir_all(&show_dir);
 
-    if let Err(e) = crate::bman::metadata::resolve_metadata(&show_dir, show, sfm_keys).await {
+    if let Err(e) = crate::bman::metadata::resolve_metadata(&show_dir, show, sfm_keys, sfm_cache).await {
         tracing::warn!("Metadata enrichment: {e}");
     }
 }

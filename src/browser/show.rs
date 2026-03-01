@@ -193,7 +193,9 @@ pub(crate) async fn show_detail(
             if catalog_show.service == Service::Bman {
                 match router.bman_api() {
                     Some(bman) => {
-                        match crate::bman::download::fetch_bman_show_detail(bman, catalog_show)
+                        let cache_dir = crate::config::paths::cache_dir();
+                        let sfm_cache = crate::bman::setlistfm::SfmCache::load(&cache_dir);
+                        match crate::bman::download::fetch_bman_show_detail(bman, catalog_show, &sfm_cache)
                             .await
                         {
                             Ok(s) => s,
@@ -316,7 +318,7 @@ async fn download_single(
         }
     };
 
-    let (mut enriched_show, tracks_with_urls, flac_convert) = if service == Service::Bman {
+    let (mut enriched_show, mut tracks_with_urls, flac_convert) = if service == Service::Bman {
         match router.bman_api() {
             Some(bman) => {
                 let twu = crate::bman::download::resolve_bman_tracks(show, bman);
@@ -343,12 +345,17 @@ async fn download_single(
     // Bman: enrich metadata before download (setlist.fm titles used for tagging)
     if service == Service::Bman {
         let sfm_keys = crate::bman::setlistfm::SetlistFmKeys::from_comma_separated(&config.bman.setlistfm_api_key);
+        let cache_dir = crate::config::paths::cache_dir();
+        let mut sfm_cache = crate::bman::setlistfm::SfmCache::load(&cache_dir);
         crate::bman::download::bman_enrich_metadata(
             &mut enriched_show,
             &output_dir,
             &sfm_keys,
+            &mut sfm_cache,
         )
         .await;
+        sfm_cache.save();
+        crate::bman::download::sync_enriched_titles(&enriched_show, &mut tracks_with_urls);
     }
 
     let outcome =

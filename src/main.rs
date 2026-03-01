@@ -74,7 +74,13 @@ enum Commands {
     /// Configure credentials
     Config,
     /// Force-refresh catalog cache
-    Refresh,
+    Refresh {
+        /// Clear setlist.fm response cache before enrichment.
+        /// Values: (no arg) = clear all, "notfound" = re-query 404s only,
+        /// or a date like "1977-05-08" to clear entries matching that date.
+        #[arg(long, value_name = "FILTER")]
+        clear_sfm_cache: Option<Option<String>>,
+    },
     /// Download a show by container ID (vertical slice)
     Download {
         /// Container ID of the show to download
@@ -139,8 +145,8 @@ async fn main() -> Result<()> {
         Some(Commands::Config) => {
             run_config()?;
         }
-        Some(Commands::Refresh) => {
-            run_refresh().await?;
+        Some(Commands::Refresh { clear_sfm_cache }) => {
+            run_refresh(clear_sfm_cache).await?;
         }
         Some(Commands::Download {
             container_id,
@@ -402,9 +408,41 @@ fn run_config() -> Result<()> {
 }
 
 /// Force-refresh the catalog cache.
-async fn run_refresh() -> Result<()> {
+async fn run_refresh(clear_sfm_cache: Option<Option<String>>) -> Result<()> {
     let mut config = load_config();
     config.normalize();
+
+    // Apply --clear-sfm-cache before enrichment
+    if let Some(filter) = &clear_sfm_cache {
+        let cache_dir = crate::config::paths::cache_dir();
+        let mut sfm_cache = bman::setlistfm::SfmCache::load(&cache_dir);
+        let before = sfm_cache.len();
+        match filter.as_deref() {
+            None | Some("") => {
+                // Clear all
+                sfm_cache.clear_matching(|_| true);
+                println!("Cleared all {} setlist.fm cache entries.", before);
+            }
+            Some("notfound") => {
+                sfm_cache.clear_not_found();
+                let after = sfm_cache.len();
+                println!("Cleared {} NotFound entries from setlist.fm cache.", before - after);
+            }
+            Some(date_filter) => {
+                // Cache keys use DD-MM-YYYY format; convert ISO dates for matching
+                let filter = bman::setlistfm::convert_date(date_filter)
+                    .unwrap_or_else(|_| date_filter.to_string());
+                sfm_cache.clear_matching(|key| key.contains(&filter));
+                let after = sfm_cache.len();
+                println!(
+                    "Cleared {} setlist.fm cache entries matching '{}'.",
+                    before - after,
+                    date_filter
+                );
+            }
+        }
+        sfm_cache.save();
+    }
 
     let (email, password) =
         get_credentials(config.email_for(Service::Nugs)).map_err(|e| anyhow::anyhow!(e))?;
@@ -556,7 +594,9 @@ async fn run_download_bman(
         });
 
     println!("Fetching Bman show {container_id}...");
-    let mut show = bman::download::fetch_bman_show_detail(&mut bman, &catalog_show)
+    let cache_dir = crate::config::paths::cache_dir();
+    let mut sfm_cache = bman::setlistfm::SfmCache::load(&cache_dir);
+    let mut show = bman::download::fetch_bman_show_detail(&mut bman, &catalog_show, &sfm_cache)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to fetch Bman show: {e}"))?;
 
@@ -571,7 +611,7 @@ async fn run_download_bman(
         bail!("Show has no tracks");
     }
 
-    let tracks_with_urls = bman::download::resolve_bman_tracks(&show, &bman);
+    let mut tracks_with_urls = bman::download::resolve_bman_tracks(&show, &bman);
 
     if tracks_with_urls.is_empty() {
         bail!("Could not resolve any download URLs");
@@ -579,8 +619,10 @@ async fn run_download_bman(
 
     // Enrich metadata before download (setlist.fm titles used for tagging)
     let sfm_keys = bman::setlistfm::SetlistFmKeys::from_comma_separated(&cfg.bman.setlistfm_api_key);
-    bman::download::bman_enrich_metadata(&mut show, output_dir, &sfm_keys)
+    bman::download::bman_enrich_metadata(&mut show, output_dir, &sfm_keys, &mut sfm_cache)
         .await;
+    sfm_cache.save();
+    bman::download::sync_enriched_titles(&show, &mut tracks_with_urls);
 
     let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
     let flac_convert = resolve_flac_convert(flac_convert_override, bman_default)?;
@@ -668,6 +710,8 @@ async fn run_download_all(
     let mut downloaded = 0usize;
     let mut skipped = 0usize;
     let sfm_keys = bman::setlistfm::SetlistFmKeys::from_comma_separated(&cfg.bman.setlistfm_api_key);
+    let cache_dir = crate::config::paths::cache_dir();
+    let mut sfm_cache = bman::setlistfm::SfmCache::load(&cache_dir);
 
     for (i, catalog_show) in shows.iter().enumerate() {
         let d = catalog_show.display_date();
@@ -681,7 +725,7 @@ async fn run_download_all(
         );
 
         // Fetch show detail + resolve tracks (branch on service)
-        let (mut show, tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
+        let (mut show, mut tracks_with_urls, flac_convert) = if catalog_show.service == Service::Bman {
             let bman = match router.bman_api() {
                 Some(b) => b,
                 None => {
@@ -690,7 +734,7 @@ async fn run_download_all(
                     continue;
                 }
             };
-            let show = match bman::download::fetch_bman_show_detail(bman, catalog_show).await {
+            let show = match bman::download::fetch_bman_show_detail(bman, catalog_show, &sfm_cache).await {
                 Ok(s) => s,
                 Err(e) => {
                     println!("  \x1b[31mFailed to fetch Bman show: {e}\x1b[0m");
@@ -734,8 +778,10 @@ async fn run_download_all(
                 &mut show,
                 &output_dir,
                 &sfm_keys,
+                &mut sfm_cache,
             )
             .await;
+            bman::download::sync_enriched_titles(&show, &mut tracks_with_urls);
         }
 
         let outcome = download_show_with_retry(
@@ -769,6 +815,8 @@ async fn run_download_all(
         }
     }
 
+    sfm_cache.save();
+
     println!("\n{downloaded}/{total} shows downloaded");
     if skipped > 0 {
         println!("{skipped} skipped");
@@ -791,6 +839,8 @@ async fn download_bman_show_batch(
     let mut downloaded = 0usize;
     let mut skipped = 0usize;
     let sfm_keys = bman::setlistfm::SetlistFmKeys::from_comma_separated(&cfg.bman.setlistfm_api_key);
+    let cache_dir = crate::config::paths::cache_dir();
+    let mut sfm_cache = bman::setlistfm::SfmCache::load(&cache_dir);
 
     for (i, catalog_show) in shows.iter().enumerate() {
         let d = catalog_show.display_date();
@@ -803,7 +853,7 @@ async fn download_bman_show_batch(
             catalog_show.venue_name,
         );
 
-        let mut show = match bman::download::fetch_bman_show_detail(bman, catalog_show).await {
+        let mut show = match bman::download::fetch_bman_show_detail(bman, catalog_show, &sfm_cache).await {
             Ok(s) => s,
             Err(e) => {
                 println!("  \x1b[31mFailed to fetch show: {e}\x1b[0m");
@@ -812,7 +862,7 @@ async fn download_bman_show_batch(
             }
         };
 
-        let tracks_with_urls = bman::download::resolve_bman_tracks(&show, bman);
+        let mut tracks_with_urls = bman::download::resolve_bman_tracks(&show, bman);
 
         if tracks_with_urls.is_empty() {
             println!("  \x1b[38;5;214mNo downloadable tracks.\x1b[0m");
@@ -820,8 +870,9 @@ async fn download_bman_show_batch(
             continue;
         }
 
-        bman::download::bman_enrich_metadata(&mut show, output_dir, &sfm_keys)
+        bman::download::bman_enrich_metadata(&mut show, output_dir, &sfm_keys, &mut sfm_cache)
             .await;
+        bman::download::sync_enriched_titles(&show, &mut tracks_with_urls);
 
         let bman_default = bman::download::bman_flac_convert(&cfg.flac_convert);
         let flac_convert = resolve_flac_convert(flac_convert_override, bman_default)?;
@@ -850,6 +901,7 @@ async fn download_bman_show_batch(
         }
     }
 
+    sfm_cache.save();
     Ok((downloaded, skipped))
 }
 

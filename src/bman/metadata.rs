@@ -1,8 +1,10 @@
 /// 5-step metadata enrichment pipeline for Bman (Google Drive) shows.
 ///
-/// Runs after FLAC files are downloaded and before transcoding/tagging.
-/// Progressively enriches track titles in `Show.tracks` from lowest to
-/// highest authority, never overwriting a higher-ranked source.
+/// Runs BEFORE `download_show()` so enriched titles are used for both
+/// filenames and audio tags. Steps that need downloaded files (Vorbis
+/// comments) are no-ops at this stage. Progressively enriches track
+/// titles in `Show.tracks` from lowest to highest authority, never
+/// overwriting a higher-ranked source.
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -12,7 +14,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use tracing::{debug, warn};
 
-use crate::bman::setlistfm::{self, SetlistFmKeys};
+use crate::bman::setlistfm::{self, SetlistFmKeys, SfmCache, SfmStatus};
 use crate::models::Show;
 
 // ---- Title source ranking ---------------------------------------------------
@@ -55,6 +57,7 @@ pub async fn resolve_metadata(
     show_dir: &Path,
     show: &mut Show,
     sfm_keys: &SetlistFmKeys,
+    sfm_cache: &mut SfmCache,
 ) -> Result<(), String> {
     if show.tracks.is_empty() {
         return Ok(());
@@ -76,9 +79,9 @@ pub async fn resolve_metadata(
     // Step 3 — Info file
     apply_info_file(show_dir, show, &mut sources);
 
-    // Step 4 — setlist.fm (async, graceful failure)
+    // Step 4 — setlist.fm (async, graceful failure) — uses cache
     if !sfm_keys.is_empty() {
-        apply_setlistfm(show, &mut sources, sfm_keys).await;
+        apply_setlistfm(show, &mut sources, sfm_keys, sfm_cache).await;
     }
 
     // Step 5 — Fallback for any tracks still without a title
@@ -103,17 +106,9 @@ fn apply_vorbis_comments(
     show: &mut Show,
     sources: &mut HashMap<i64, TitleSource>,
 ) {
-    // Build a map from track_id → expected filename position so we can match
-    // the right file to the right track. We look for any .flac files in the
-    // show directory (or disc subdirectories) and try to read their TITLE tag.
-    //
-    // Strategy: For each track, try to open the corresponding .flac file from
-    // the show_dir using the track's disc_num and track_num.
-    //
-    // Since we don't store filenames in Track, we scan the directory and sort
-    // by name to align with the sorted tracks.
+    // Align sorted FLAC files with sorted tracks by position. Track filenames
+    // are not stored in Track, so we rely on sort order matching.
     let flac_files = collect_flac_files(show_dir);
-
     let sorted_indices = sorted_track_indices(show);
 
     for (file_pos, &track_idx) in sorted_indices.iter().enumerate() {
@@ -128,12 +123,9 @@ fn apply_vorbis_comments(
             continue;
         }
 
-        match read_vorbis_title(path) {
-            Some(title) if !title.is_empty() => {
-                show.tracks[track_idx].song_title = title;
-                sources.insert(track_id, TitleSource::VorbisComment);
-            }
-            _ => {}
+        if let Some(title) = read_vorbis_title(path).filter(|t| !t.is_empty()) {
+            show.tracks[track_idx].song_title = title;
+            sources.insert(track_id, TitleSource::VorbisComment);
         }
     }
 }
@@ -311,33 +303,56 @@ async fn apply_setlistfm(
     show: &mut Show,
     sources: &mut HashMap<i64, TitleSource>,
     sfm_keys: &SetlistFmKeys,
+    sfm_cache: &mut SfmCache,
 ) {
-    let date = &show.performance_date;
-    let artist = &show.artist_name;
+    let date = show.performance_date.clone();
+    let artist = show.artist_name.clone();
 
     if date.is_empty() || artist.is_empty() {
         return;
     }
 
+    // Check cache first
+    if let Some(status) = sfm_cache.lookup(&artist, &date) {
+        match status {
+            SfmStatus::Found { songs, .. } => {
+                if !songs.is_empty() {
+                    debug!(
+                        "setlist.fm cache hit: {} songs for {} {}",
+                        songs.len(), artist, date
+                    );
+                    let songs = songs.clone();
+                    apply_titles_by_position(show, sources, &songs, TitleSource::SetlistFm);
+                }
+            }
+            SfmStatus::NotFound => {
+                debug!("setlist.fm cache: not found for {} on {}", artist, date);
+            }
+        }
+        return;
+    }
+
+    // Cache miss — make API call
     let client = reqwest::Client::new();
-
-    let result = setlistfm::fetch_setlist(&client, sfm_keys, artist, date).await;
-
-    match result {
-        Ok(Some(setlist_titles)) => {
+    match setlistfm::fetch_setlist_full(&client, sfm_keys, &artist, &date).await {
+        Ok(Some(result)) => {
             debug!(
-                "setlist.fm returned {} titles for {} {}",
-                setlist_titles.len(),
-                artist,
-                date
+                "setlist.fm returned {} songs for {} {}",
+                result.songs.len(), artist, date
             );
-            apply_titles_by_position(show, sources, &setlist_titles, TitleSource::SetlistFm);
+            apply_titles_by_position(show, sources, &result.songs, TitleSource::SetlistFm);
+            sfm_cache.insert(&artist, &date, SfmStatus::Found {
+                venue: result.venue,
+                songs: result.songs,
+            });
         }
         Ok(None) => {
             debug!("setlist.fm: no results for {} on {}", artist, date);
+            sfm_cache.insert(&artist, &date, SfmStatus::NotFound);
         }
         Err(e) => {
             warn!("setlist.fm fetch failed (non-fatal): {}", e);
+            // Don't cache errors — they're transient
         }
     }
 }

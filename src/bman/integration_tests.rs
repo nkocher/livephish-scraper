@@ -24,6 +24,12 @@ mod tests {
 
     // ── Helper builders ─────────────────────────────────────────────────
 
+    /// Empty SfmCache for tests that don't need cached setlist.fm titles.
+    fn empty_sfm_cache() -> crate::bman::setlistfm::SfmCache {
+        let tmp = tempdir().unwrap();
+        crate::bman::setlistfm::SfmCache::load(tmp.path())
+    }
+
     fn make_drive_item(id: &str, name: &str, mime: &str) -> DriveItem {
         DriveItem {
             id: id.to_string(),
@@ -817,7 +823,7 @@ mod tests {
             "1977-05-08", "Cornell University", "Ithaca", "NY",
         );
 
-        let show = fetch_bman_show_detail(&mut bman, &catalog_show).await.unwrap();
+        let show = fetch_bman_show_detail(&mut bman, &catalog_show, &empty_sfm_cache()).await.unwrap();
         assert_eq!(show.tracks.len(), 3);
         assert_eq!(show.tracks[0].song_title, "Bertha");
         assert_eq!(show.tracks[1].song_title, "Greatest Story Ever Told");
@@ -887,7 +893,7 @@ mod tests {
             "1977-05-08", "Cornell", "Ithaca", "NY",
         );
 
-        let show = fetch_bman_show_detail(&mut bman, &catalog_show).await.unwrap();
+        let show = fetch_bman_show_detail(&mut bman, &catalog_show, &empty_sfm_cache()).await.unwrap();
         assert_eq!(show.tracks.len(), 4);
         // Should be sorted by disc then track
         assert_eq!(show.tracks[0].disc_num, 1);
@@ -906,7 +912,7 @@ mod tests {
 
         // id_map is empty, so this should fail
         let mut bman_mut = bman;
-        let err = fetch_bman_show_detail(&mut bman_mut, &catalog_show).await.unwrap_err();
+        let err = fetch_bman_show_detail(&mut bman_mut, &catalog_show, &empty_sfm_cache()).await.unwrap_err();
         assert!(err.contains("No Drive folder mapped"), "Error: {}", err);
     }
 
@@ -935,7 +941,7 @@ mod tests {
             "1977-05-08", "Cornell", "Ithaca", "NY",
         );
 
-        let show = fetch_bman_show_detail(&mut bman, &catalog_show).await.unwrap();
+        let show = fetch_bman_show_detail(&mut bman, &catalog_show, &empty_sfm_cache()).await.unwrap();
         assert!(show.tracks.is_empty(), "Empty folder should produce no tracks");
     }
 
@@ -1141,7 +1147,8 @@ mod tests {
 
         // No setlistfm key = skip that step
         let sfm_keys = crate::bman::setlistfm::SetlistFmKeys::from_comma_separated("");
-        bman_enrich_metadata(&mut show, tmp.path(), &sfm_keys).await;
+        let mut sfm_cache = crate::bman::setlistfm::SfmCache::load(tmp.path());
+        bman_enrich_metadata(&mut show, tmp.path(), &sfm_keys, &mut sfm_cache).await;
 
         let expected_dir = tmp.path().join(show.folder_name());
         assert!(expected_dir.exists(), "Show dir should be created");

@@ -74,6 +74,20 @@ pub fn make_track_filename(track_num: i64, title: &str, extension: &str) -> Stri
     )
 }
 
+/// Format a disc-aware track filename: `{disc}-{track:02}. {title}{ext}`.
+///
+/// Used for multi-disc shows to prevent filename collisions when different
+/// discs have the same track number (e.g., d1t01 and d2t01 both = track 1).
+pub fn make_track_filename_with_disc(disc: i64, track_num: i64, title: &str, extension: &str) -> String {
+    format!(
+        "{}-{:02}. {}{}",
+        disc,
+        track_num,
+        sanitize_filename(title, 200),
+        extension
+    )
+}
+
 /// Check if a track is already fully processed and should be skipped.
 fn should_skip_track(
     final_dest: &Path,
@@ -287,6 +301,9 @@ pub async fn download_show(
     let flac_target = effective_flac_target(flac_convert, requested_format.name());
     let mut warned_no_ffmpeg_flac = false;
 
+    // Detect multi-disc shows for disc-prefixed filenames
+    let max_disc = tracks_with_urls.iter().map(|(t, _, _)| t.disc_num).max().unwrap_or(1);
+
     // ── Phase 1: Pre-filter (skip/resume) ───────────────────────────
     let mut to_download: Vec<(Track, String, Quality, PathBuf, ConversionMode)> = Vec::new();
     let mut pre_completed = 0usize;
@@ -298,7 +315,11 @@ pub async fn download_show(
             continue;
         }
 
-        let filename = make_track_filename(track.track_num, &track.song_title, quality.extension);
+        let filename = if max_disc > 1 {
+            make_track_filename_with_disc(track.disc_num, track.track_num, &track.song_title, quality.extension)
+        } else {
+            make_track_filename(track.track_num, &track.song_title, quality.extension)
+        };
         let download_dest = show_dir.join(&filename);
 
         let conversion = if effective_codec != "none" && quality.code == "aac" {

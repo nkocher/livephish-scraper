@@ -510,18 +510,19 @@ impl Catalog {
             let _ = self.fetch_artist(router, artist_id).await;
         }
 
-        // Re-enrich Bman catalog: delete marker so fetch_bman_enriched always runs
+        // Re-scan Bman catalog: delete marker so fetch_bman_enriched always runs.
+        // Drive re-scan runs even without a setlist.fm key — only enrichment is skipped.
         if let Some(bman) = router.bman.as_mut() {
             let sfm_key = self.setlistfm_api_key.clone();
+            let marker = self.cache_dir.join("bman_enriched.marker");
+            let _ = fs::remove_file(&marker);
             if sfm_key.trim().is_empty() {
-                tracing::debug!("Skipping Bman re-enrichment: no setlist.fm API key configured");
+                println!("Re-scanning Bman catalog (no setlist.fm key — venue data will not be enriched)...");
             } else {
-                let marker = self.cache_dir.join("bman_enriched.marker");
-                let _ = fs::remove_file(&marker);
                 println!("Re-enriching Bman catalog via setlist.fm...");
-                if let Err(e) = self.fetch_bman_enriched(bman, &sfm_key).await {
-                    tracing::warn!("Bman refresh failed: {e}");
-                }
+            }
+            if let Err(e) = self.fetch_bman_enriched(bman, &sfm_key).await {
+                tracing::warn!("Bman refresh failed: {e}");
             }
         }
     }
@@ -613,27 +614,57 @@ impl Catalog {
 
         // Enrich ALL shows via setlist.fm — it's the source of truth for
         // venue/city/state. Folder names are unreliable (taper names, shn.org IDs, etc.)
+        // Uses SfmCache: only shows with cache misses trigger API calls.
         let mut aborted = false;
         let sfm_keys = SetlistFmKeys::from_comma_separated(setlistfm_api_key);
+        let mut sfm_cache = crate::bman::setlistfm::SfmCache::load(&self.cache_dir);
         if !sfm_keys.is_empty() {
+            use crate::bman::setlistfm::{SfmStatus, fetch_setlist_full};
+
+            let (cached, expired, total_cache) = sfm_cache.stats();
             tracing::info!(
-                "Enriching {} shows via setlist.fm ({} API key{})...",
+                "Enriching {} shows via setlist.fm ({} API key{}, cache: {} hit, {} expired, {} total)...",
                 deduped.len(),
                 sfm_keys.len(),
                 if sfm_keys.len() == 1 { "" } else { "s" },
+                cached,
+                expired,
+                total_cache,
             );
             let client = reqwest::Client::new();
             let mut enriched = 0usize;
+            let mut cache_hits = 0usize;
+            let mut api_calls = 0usize;
             let mut consecutive_errors = 0usize;
             let total = deduped.len();
-            let rate_limit = std::time::Duration::from_millis(500);
+            let rate_limit = std::time::Duration::from_millis(600);
 
             for (i, show) in deduped.iter_mut().enumerate() {
                 if (i + 1) % 100 == 0 {
-                    println!("  setlist.fm: {}/{} shows processed ({} enriched)...", i + 1, total, enriched);
+                    println!(
+                        "  setlist.fm: {}/{} shows ({} enriched, {} cached, {} API calls)...",
+                        i + 1, total, enriched, cache_hits, api_calls
+                    );
                 }
                 let artist_name = show.artist.name();
-                match crate::bman::setlistfm::fetch_setlist_venue(
+
+                // Check cache first
+                if let Some(status) = sfm_cache.lookup(artist_name, &show.date) {
+                    match status {
+                        SfmStatus::Found { venue, .. } => {
+                            show.venue = venue.venue_name.clone();
+                            show.city = venue.city.clone();
+                            show.state = venue.state.clone();
+                            enriched += 1;
+                        }
+                        SfmStatus::NotFound => {}
+                    }
+                    cache_hits += 1;
+                    continue;
+                }
+
+                // Cache miss — make API call
+                match fetch_setlist_full(
                     &client,
                     &sfm_keys,
                     artist_name,
@@ -641,14 +672,19 @@ impl Catalog {
                 )
                 .await
                 {
-                    Ok(Some(sv)) => {
-                        show.venue = sv.venue_name;
-                        show.city = sv.city;
-                        show.state = sv.state;
+                    Ok(Some(result)) => {
+                        show.venue = result.venue.venue_name.clone();
+                        show.city = result.venue.city.clone();
+                        show.state = result.venue.state.clone();
+                        sfm_cache.insert(artist_name, &show.date, SfmStatus::Found {
+                            venue: result.venue,
+                            songs: result.songs,
+                        });
                         enriched += 1;
                         consecutive_errors = 0;
                     }
                     Ok(None) => {
+                        sfm_cache.insert(artist_name, &show.date, SfmStatus::NotFound);
                         consecutive_errors = 0;
                     }
                     Err(e) => {
@@ -676,14 +712,23 @@ impl Catalog {
                         }
                     }
                 }
+                api_calls += 1;
+                // Periodic cache flush every 50 API calls
+                if api_calls.is_multiple_of(50) {
+                    sfm_cache.save();
+                }
                 tokio::time::sleep(rate_limit).await;
             }
             tracing::info!(
-                "setlist.fm enriched {}/{} shows",
+                "setlist.fm: enriched {}/{} shows ({} cache hits, {} API calls)",
                 enriched,
-                deduped.len()
+                deduped.len(),
+                cache_hits,
+                api_calls,
             );
         }
+        // Always save cache (including on abort — preserves partial progress)
+        sfm_cache.save();
 
         // Register artists
         self.register_artist(BMAN_GD_ARTIST_ID, "Grateful Dead");
