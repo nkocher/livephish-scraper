@@ -236,7 +236,7 @@ impl BmanApi {
 }
 
 /// Extract the first `reason` and the top-level `message` from a Drive error body.
-fn parse_drive_error_reason(body: &str) -> (Option<String>, Option<String>) {
+pub fn parse_drive_error_reason(body: &str) -> (Option<String>, Option<String>) {
     if let Ok(err) = serde_json::from_str::<DriveErrorResponse>(body) {
         let reason = err.error.errors.first().map(|e| e.reason.clone());
         (reason, Some(err.error.message))

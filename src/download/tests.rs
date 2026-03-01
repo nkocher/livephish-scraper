@@ -395,6 +395,189 @@ async fn test_retry_respects_cancellation() {
 }
 
 // ====================================
+// is_retriable
+// ====================================
+
+#[test]
+fn test_is_retriable_drive_rate_limit() {
+    let err = anyhow::anyhow!("drive rate limit (403)");
+    assert!(is_retriable(&err));
+}
+
+#[test]
+fn test_is_retriable_drive_quota_exceeded() {
+    let err = anyhow::anyhow!("drive quota exceeded (403)");
+    assert!(!is_retriable(&err));
+}
+
+#[test]
+fn test_is_retriable_generic_403() {
+    let err = anyhow::anyhow!("HTTP 403 Forbidden: some body");
+    assert!(!is_retriable(&err));
+}
+
+// ====================================
+// download_track Drive 403 classification
+// ====================================
+
+#[tokio::test]
+async fn test_download_track_drive_rate_limit_403() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "error": {
+            "errors": [{"domain": "usageLimits", "reason": "rateLimitExceeded", "message": "Rate Limit Exceeded"}],
+            "code": 403,
+            "message": "Rate Limit Exceeded"
+        }
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Song.flac");
+    let (pb, cancel, client) = test_fixtures();
+
+    let result = download_track(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &pb,
+        &cancel,
+        &client,
+        "test",
+        "https://example.com",
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("drive rate limit"), "got: {err}");
+    assert!(is_retriable(&err));
+}
+
+#[tokio::test]
+async fn test_download_track_drive_quota_exceeded_403() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "error": {
+            "errors": [{"domain": "usageLimits", "reason": "downloadQuotaExceeded", "message": "Download quota exceeded"}],
+            "code": 403,
+            "message": "Download quota exceeded"
+        }
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Song.flac");
+    let (pb, cancel, client) = test_fixtures();
+
+    let result = download_track(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &pb,
+        &cancel,
+        &client,
+        "test",
+        "https://example.com",
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("drive quota exceeded"), "got: {err}");
+    assert!(!is_retriable(&err));
+}
+
+#[tokio::test]
+async fn test_download_track_drive_forbidden_403() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let body = serde_json::json!({
+        "error": {
+            "errors": [{"domain": "global", "reason": "forbidden", "message": "Access denied"}],
+            "code": 403,
+            "message": "Access denied"
+        }
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(body))
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Song.flac");
+    let (pb, cancel, client) = test_fixtures();
+
+    let result = download_track(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &pb,
+        &cancel,
+        &client,
+        "test",
+        "https://example.com",
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("HTTP 403 Forbidden"), "got: {err}");
+    assert!(!is_retriable(&err));
+}
+
+#[tokio::test]
+async fn test_download_track_google_abuse_detection_403() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // Google's network-level abuse page (HTML, not JSON)
+    let html_body = r#"<html><head><title>Sorry...</title></head><body>
+        <p>... but your computer or network may be sending automated queries.</p>
+        </body></html>"#;
+
+    Mock::given(method("GET"))
+        .and(path("/track.flac"))
+        .respond_with(ResponseTemplate::new(403).set_body_string(html_body))
+        .mount(&server)
+        .await;
+
+    let dir = tempdir().unwrap();
+    let dest = dir.path().join("01. Song.flac");
+    let (pb, cancel, client) = test_fixtures();
+
+    let result = download_track(
+        &format!("{}/track.flac", server.uri()),
+        &dest,
+        &pb,
+        &cancel,
+        &client,
+        "test",
+        "https://example.com",
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("drive rate limit"), "got: {err}");
+    assert!(is_retriable(&err), "HTML abuse 403 should be retriable");
+}
+
+// ====================================
 // download_show_with_retry via wiremock
 // ====================================
 

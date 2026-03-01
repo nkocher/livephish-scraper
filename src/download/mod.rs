@@ -24,6 +24,8 @@ use self::progress::make_overall_bar;
 
 const ESCAPE_CHECK_INTERVAL: usize = 64;
 const MAX_CONCURRENT: usize = 3;
+const BMAN_MAX_CONCURRENT: usize = 1;
+const BMAN_INTER_TRACK_DELAY_MS: u64 = 3000;
 const DOWNLOAD_MAX_RETRIES: u32 = 3; // 4 total attempts
 const DOWNLOAD_RETRY_BASE_SECS: u64 = 5; // backoff: 5s, 10s, 15s
 
@@ -140,6 +142,25 @@ pub async fn download_track(
         .send()
         .await?;
 
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        let body = response.text().await.unwrap_or_default();
+        // Drive API JSON errors (per-key quota)
+        let (reason, _msg) = crate::bman::parse_drive_error_reason(&body);
+        return match reason.as_deref() {
+            Some("rateLimitExceeded") | Some("userRateLimitExceeded") => {
+                Err(anyhow::anyhow!("drive rate limit (403)"))
+            }
+            Some("downloadQuotaExceeded") => {
+                Err(anyhow::anyhow!("drive quota exceeded (403)"))
+            }
+            _ if body.contains("automated queries") => {
+                // Google network-level abuse detection (HTML page, not JSON)
+                Err(anyhow::anyhow!("drive rate limit (403)"))
+            }
+            _ => Err(anyhow::anyhow!("HTTP 403 Forbidden: {}", body)),
+        };
+    }
     response.error_for_status_ref()?;
 
     let total = response.content_length().unwrap_or(0);
@@ -177,9 +198,10 @@ pub async fn download_track(
 
 /// Check whether an error from `download_track` is worth retrying.
 ///
-/// Retries transport failures (connect, timeout, body, decode) and server
-/// errors (5xx, 429). Fails fast on other 4xx — those indicate bad URLs or
-/// auth failures that won't resolve with a retry.
+/// Retries transport failures (connect, timeout, body, decode), server
+/// errors (5xx, 429), and Drive rate-limit 403s (both JSON API and HTML
+/// abuse-detection pages). Fails fast on other 4xx — those indicate bad
+/// URLs or auth failures that won't resolve with a retry.
 fn is_retriable(err: &anyhow::Error) -> bool {
     if let Some(re) = err.downcast_ref::<reqwest::Error>() {
         if re.is_connect() || re.is_timeout() || re.is_body() || re.is_decode() {
@@ -189,7 +211,8 @@ fn is_retriable(err: &anyhow::Error) -> bool {
             return status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
         }
     }
-    false
+    // Drive rate-limit 403 → retry with backoff (sentinel from download_track)
+    err.to_string().contains("drive rate limit")
 }
 
 /// Wrap `download_track` with exponential backoff + jitter.
@@ -270,7 +293,7 @@ enum TrackResult {
 
 /// Download all tracks in a show with parallel progress.
 ///
-/// Downloads up to 3 tracks concurrently. Uses a single overall progress
+/// Downloads up to 3 tracks concurrently (1 for Bman/Google Drive). Uses a single overall progress
 /// bar with `pb.println()` for per-track completion messages. This avoids
 /// MultiProgress rendering issues with concurrent bar insertion/removal.
 /// Returns a `DownloadOutcome` with completion status and failure count.
@@ -398,7 +421,11 @@ pub async fn download_show(
 
     // ── Phase 2: Parallel download ──────────────────────────────────
     let download_count = to_download.len();
-    let concurrent = MAX_CONCURRENT.min(download_count);
+    let concurrent = if service == Service::Bman {
+        BMAN_MAX_CONCURRENT.min(download_count)
+    } else {
+        MAX_CONCURRENT.min(download_count)
+    };
 
     println!(
         "  Downloading {} track{} ({} concurrent)",
@@ -426,10 +453,12 @@ pub async fn download_show(
         .unwrap();
 
     let mut handles = Vec::new();
+    let bman_first_track = Arc::new(AtomicBool::new(true));
 
     for (track, url, _quality, download_dest, conversion) in to_download {
         let sem = semaphore.clone();
         let cancel = cancel_flag.clone();
+        let first_track = bman_first_track.clone();
         let overall = overall_pb.clone();
         let show_ref = show_arc.clone();
         let codec_ref = codec.clone();
@@ -450,6 +479,12 @@ pub async fn download_show(
 
             if cancel.load(Ordering::Relaxed) {
                 return TrackResult::Cancelled;
+            }
+
+            // Throttle Bman (Google Drive) downloads to avoid abuse detection.
+            // Skip delay for the first track — throttle is between tracks, not before.
+            if service == Service::Bman && !first_track.swap(false, Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(BMAN_INTER_TRACK_DELAY_MS)).await;
             }
 
             match download_track_with_retry(
