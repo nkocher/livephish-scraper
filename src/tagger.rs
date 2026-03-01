@@ -42,7 +42,8 @@ pub fn tag_track(path: &Path, show: &Show, track: &Track) -> anyhow::Result<()> 
 
     // Disc number/total → Vorbis DISCNUMBER / MP4 disk tuple
     push_text(tag, ItemKey::DiscNumber, track.disc_num.to_string());
-    push_text(tag, ItemKey::DiscTotal, "1".to_string());
+    let disc_total = show.tracks.iter().map(|t| t.disc_num).max().unwrap_or(1);
+    push_text(tag, ItemKey::DiscTotal, disc_total.to_string());
 
     tag.save_to_path(path, WriteOptions::default())?;
     Ok(())

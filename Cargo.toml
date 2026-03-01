@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/tapetag"]
+
 [package]
 name = "nugs"
 version = "0.2.0"
