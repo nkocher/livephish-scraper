@@ -46,6 +46,7 @@ jobs:
           Get-ChildItem -Recurse ffmpeg_tmp -Filter "ffprobe.exe" | Copy-Item -Destination dist/
           Copy-Item "target\x86_64-pc-windows-msvc\release\nugs.exe" dist\
           Copy-Item "START.bat" dist\
+          Copy-Item "SETUP.bat" dist\
           Copy-Item "LICENSE-ffmpeg.txt" dist\
 
       - name: Create ZIP
