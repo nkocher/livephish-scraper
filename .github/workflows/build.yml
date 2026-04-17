@@ -40,7 +40,7 @@ jobs:
           # Pinned to n7.1 -- update this URL when upgrading ffmpeg
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-7.1.zip"
           Invoke-WebRequest $url -OutFile ffmpeg.zip
-          7z x ffmpeg.zip -o ffmpeg_tmp
+          7z x ffmpeg.zip -offmpeg_tmp
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Get-ChildItem -Recurse ffmpeg_tmp -Filter "ffmpeg.exe"  | Copy-Item -Destination dist/
           Get-ChildItem -Recurse ffmpeg_tmp -Filter "ffprobe.exe" | Copy-Item -Destination dist/
