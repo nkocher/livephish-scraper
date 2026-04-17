@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           # Pinned to n7.1 -- update this URL when upgrading ffmpeg
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2025-04-14-12-50/ffmpeg-n7.1-latest-win64-lgpl-7.1.zip"
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-7.1.zip"
           Invoke-WebRequest $url -OutFile ffmpeg.zip
           7z x ffmpeg.zip -o ffmpeg_tmp
           New-Item -ItemType Directory -Force -Path dist | Out-Null
