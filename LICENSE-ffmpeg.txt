@@ -1,0 +1,60 @@
+This distribution bundles FFmpeg (https://ffmpeg.org), licensed under the
+GNU Lesser General Public License version 2.1 (LGPL v2.1).
+
+FFmpeg version bundled: n7.1
+
+FFmpeg source code is available at: https://github.com/FFmpeg/FFmpeg
+
+In accordance with the LGPL v2.1, you are free to replace the bundled
+ffmpeg.exe and ffprobe.exe binaries with your own build of FFmpeg.
+To do so, place your ffmpeg.exe and ffprobe.exe in the same folder as nugs.exe.
+
+The full text of the LGPL v2.1 license follows:
+
+                  GNU LESSER GENERAL PUBLIC LICENSE
+                       Version 2.1, February 1999
+
+ Copyright (C) 1991, 1999 Free Software Foundation, Inc.
+ 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+[This is the first of two licenses that apply to the free software
+in FFmpeg. The FFmpeg project is dual-licensed: you may use it under
+the terms of either the LGPL v2.1 or the GPL v2 (or later). This
+file covers the LGPL path.]
+
+                            Preamble
+
+  The licenses for most software are designed to take away your
+freedom to share and change it.  By contrast, the GNU General Public
+Licenses are intended to guarantee your freedom to share and change
+free software--to make sure the software remains free for all its users.
+
+  This license, the Lesser General Public License, applies to some
+specially designated software packages--typically libraries--of the
+Free Software Foundation and other authors who decide to use it.  You
+can use it too, but we suggest you first think carefully about whether
+this license or the ordinary General Public License is the better
+strategy to use in any particular case, based on the explanations below.
+
+  When we speak of free software, we are referring to freedom of use,
+not price.  Our Free Software Licenses are designed to make sure that
+you have the freedom to distribute copies of free software (and charge
+for this service if you wish); that you receive source code or can get
+it if you want it; that you can change the software and use pieces of
+it in new free programs; and that you are informed that you can do
+these things.
+
+  To protect your rights, we need to make legal notices that explain
+the terms under which you may use this software.
+
+  For the protection of FFmpeg's authors and the Free Software
+Foundation, the LGPL clearly explains that there is no warranty for
+this free software and no liability for using it.
+
+The complete license text is available at:
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+For the full license text and all applicable terms, please refer to the
+above URL or the LGPL v2.1 license included with the FFmpeg source code.

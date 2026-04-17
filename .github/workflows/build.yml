@@ -1,0 +1,197 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Smoke test
+        run: target\x86_64-pc-windows-msvc\release\nugs.exe --version
+
+      - name: Download ffmpeg
+        shell: pwsh
+        run: |
+          # Pinned to n7.1 -- update this URL when upgrading ffmpeg
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2025-04-14-12-50/ffmpeg-n7.1-latest-win64-lgpl-7.1.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          7z x ffmpeg.zip -o ffmpeg_tmp
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Get-ChildItem -Recurse ffmpeg_tmp -Filter "ffmpeg.exe"  | Copy-Item -Destination dist/
+          Get-ChildItem -Recurse ffmpeg_tmp -Filter "ffprobe.exe" | Copy-Item -Destination dist/
+          Copy-Item "target\x86_64-pc-windows-msvc\release\nugs.exe" dist\
+          Copy-Item "START.bat" dist\
+          Copy-Item "LICENSE-ffmpeg.txt" dist\
+
+      - name: Create ZIP
+        run: 7z a Nugs-Windows.zip .\dist\*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nugs-Windows
+          path: Nugs-Windows.zip
+
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Smoke test
+        run: ./target/release/nugs --version
+
+      - name: Install ffmpeg (arm64 via Homebrew)
+        run: brew install ffmpeg
+
+      - name: Bundle
+        run: |
+          mkdir -p dist
+          cp target/release/nugs dist/
+          cp "$(which ffmpeg)" dist/
+          cp "$(which ffprobe)" dist/
+          cp LICENSE-ffmpeg.txt dist/
+          tar -czf Nugs-macOS.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nugs-macOS
+          path: Nugs-macOS.tar.gz
+
+  linux:
+    name: Linux (x86_64 static)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build (fully static)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Smoke test
+        run: ./target/x86_64-unknown-linux-musl/release/nugs --version
+
+      - name: Download static ffmpeg
+        run: |
+          wget -q "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -O ffmpeg.tar.xz
+          tar -xf ffmpeg.tar.xz
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/nugs dist/
+          cp ffmpeg-*-amd64-static/ffmpeg dist/
+          cp ffmpeg-*-amd64-static/ffprobe dist/
+          cp LICENSE-ffmpeg.txt dist/
+          tar -czf Nugs-Linux.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nugs-Linux
+          path: Nugs-Linux.tar.gz
+
+  release:
+    name: Publish Release
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: SHA256 checksums
+        run: |
+          cd artifacts
+          sha256sum \
+            Nugs-Windows/Nugs-Windows.zip \
+            Nugs-macOS/Nugs-macOS.tar.gz \
+            Nugs-Linux/Nugs-Linux.tar.gz \
+            > checksums.txt
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/Nugs-Windows/Nugs-Windows.zip
+            artifacts/Nugs-macOS/Nugs-macOS.tar.gz
+            artifacts/Nugs-Linux/Nugs-Linux.tar.gz
+            artifacts/checksums.txt
+          body: |
+            ## Download
+
+            | Platform | File |
+            |---|---|
+            | Windows | `Nugs-Windows.zip` |
+            | macOS (Apple Silicon) | `Nugs-macOS.tar.gz` |
+            | Linux (x86_64) | `Nugs-Linux.tar.gz` |
+
+            ## Windows -- no setup required
+
+            1. Download `Nugs-Windows.zip`
+            2. Right-click the ZIP and choose **Extract All**, pick a folder
+            3. Double-click **START.bat**
+
+            > **Windows safety warnings**
+            > - *"Windows protected your PC"* (SmartScreen): click **More info** then **Run anyway**
+            > - Windows Defender may quarantine `ffmpeg.exe` -- go to **Windows Security > Protection History > Allow**
+
+            4. First run: type `config` and press Enter to set up your credentials.
+
+            ## macOS / Linux
+
+            ```
+            tar -xzf Nugs-macOS.tar.gz && ./nugs
+            ```
+
+            ## What's included
+            `nugs` + `ffmpeg` + `ffprobe` -- no separate installs needed.
