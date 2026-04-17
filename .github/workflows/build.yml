@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     name: Windows (x86_64)
@@ -31,7 +34,7 @@ jobs:
       - name: Smoke test
         run: target\x86_64-pc-windows-msvc\release\nugs.exe --version
 
-      - name: Download ffmpeg
+      - name: Download ffmpeg and bundle
         shell: pwsh
         run: |
           # Pinned to n7.1 -- update this URL when upgrading ffmpeg
@@ -48,10 +51,39 @@ jobs:
       - name: Create ZIP
         run: 7z a Nugs-Windows.zip .\dist\*
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Nugs-Windows
-          path: Nugs-Windows.zip
+          files: Nugs-Windows.zip
+          body: |
+            ## Download
+
+            | Platform | File |
+            |---|---|
+            | Windows | `Nugs-Windows.zip` |
+            | macOS (Apple Silicon) | `Nugs-macOS.tar.gz` |
+            | Linux (x86_64) | `Nugs-Linux.tar.gz` |
+
+            ## Windows -- no setup required
+
+            1. Download `Nugs-Windows.zip`
+            2. Right-click the ZIP and choose **Extract All**, pick a folder
+            3. Double-click **START.bat**
+
+            > **Windows safety warnings**
+            > - *"Windows protected your PC"* (SmartScreen): click **More info** then **Run anyway**
+            > - Windows Defender may quarantine `ffmpeg.exe` -- go to **Windows Security > Protection History > Allow**
+
+            4. First run: type `config` and press Enter to set up your credentials.
+
+            ## macOS / Linux
+
+            ```
+            tar -xzf Nugs-macOS.tar.gz && ./nugs
+            ```
+
+            ## What's included
+            `nugs` + `ffmpeg` + `ffprobe` -- no separate installs needed.
 
   macos:
     name: macOS (arm64)
@@ -88,10 +120,10 @@ jobs:
           cp LICENSE-ffmpeg.txt dist/
           tar -czf Nugs-macOS.tar.gz -C dist .
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Nugs-macOS
-          path: Nugs-macOS.tar.gz
+          files: Nugs-macOS.tar.gz
 
   linux:
     name: Linux (x86_64 static)
@@ -121,7 +153,7 @@ jobs:
       - name: Smoke test
         run: ./target/x86_64-unknown-linux-musl/release/nugs --version
 
-      - name: Download static ffmpeg
+      - name: Download static ffmpeg and bundle
         run: |
           wget -q "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -O ffmpeg.tar.xz
           tar -xf ffmpeg.tar.xz
@@ -132,66 +164,7 @@ jobs:
           cp LICENSE-ffmpeg.txt dist/
           tar -czf Nugs-Linux.tar.gz -C dist .
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Nugs-Linux
-          path: Nugs-Linux.tar.gz
-
-  release:
-    name: Publish Release
-    needs: [windows, macos, linux]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: SHA256 checksums
-        run: |
-          cd artifacts
-          sha256sum \
-            Nugs-Windows/Nugs-Windows.zip \
-            Nugs-macOS/Nugs-macOS.tar.gz \
-            Nugs-Linux/Nugs-Linux.tar.gz \
-            > checksums.txt
-          cat checksums.txt
-
-      - name: Publish GitHub Release
+      - name: Publish to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/Nugs-Windows/Nugs-Windows.zip
-            artifacts/Nugs-macOS/Nugs-macOS.tar.gz
-            artifacts/Nugs-Linux/Nugs-Linux.tar.gz
-            artifacts/checksums.txt
-          body: |
-            ## Download
-
-            | Platform | File |
-            |---|---|
-            | Windows | `Nugs-Windows.zip` |
-            | macOS (Apple Silicon) | `Nugs-macOS.tar.gz` |
-            | Linux (x86_64) | `Nugs-Linux.tar.gz` |
-
-            ## Windows -- no setup required
-
-            1. Download `Nugs-Windows.zip`
-            2. Right-click the ZIP and choose **Extract All**, pick a folder
-            3. Double-click **START.bat**
-
-            > **Windows safety warnings**
-            > - *"Windows protected your PC"* (SmartScreen): click **More info** then **Run anyway**
-            > - Windows Defender may quarantine `ffmpeg.exe` -- go to **Windows Security > Protection History > Allow**
-
-            4. First run: type `config` and press Enter to set up your credentials.
-
-            ## macOS / Linux
-
-            ```
-            tar -xzf Nugs-macOS.tar.gz && ./nugs
-            ```
-
-            ## What's included
-            `nugs` + `ffmpeg` + `ffprobe` -- no separate installs needed.
+          files: Nugs-Linux.tar.gz
